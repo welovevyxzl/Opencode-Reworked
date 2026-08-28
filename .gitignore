@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+coverage/
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.*
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temp / state created at runtime lives in %USERPROFILE%\.opencode-remote,
+# but local copies should never be committed:
+state/
+.secrets.json
