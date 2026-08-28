@@ -51,6 +51,22 @@ export async function handleComponent(interaction: BaseInteraction): Promise<voi
     return;
   }
 
+  if (id === "oc_regen") {
+    await interaction.deferUpdate().catch(() => undefined);
+    if (getCurrentJob()) {
+      await interaction.followUp({ content: "A task is already running.", ephemeral: true }).catch(() => undefined);
+      return;
+    }
+    const ts = getThreadSession(interaction.channelId);
+    if (!ts) {
+      await interaction.followUp({ content: "No session attached to this thread.", ephemeral: true }).catch(() => undefined);
+      return;
+    }
+    // Re-queue the last prompt - we'd need to store it. For now, ask user to re-prompt.
+    await interaction.followUp({ content: "Regenerate: please send your prompt again, or use Continue.", ephemeral: true }).catch(() => undefined);
+    return;
+  }
+
   if (id === "oc_continue") {
     await interaction.deferUpdate().catch(() => undefined);
     if (!interaction.isButton()) return;

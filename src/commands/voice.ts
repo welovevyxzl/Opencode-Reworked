@@ -1,25 +1,20 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from "discord.js";
+import { SlashCommandBuilder, ChatInputCommandInteraction, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, Colors } from "discord.js";
 import { loadConfig, saveConfig } from "../storage/index.js";
 import { logWarn } from "../utils/logger.js";
+import { successEmbed, errorEmbed, baseEmbed } from "../discord/ui.js";
 
 export const data = new SlashCommandBuilder()
   .setName("voice")
   .setDescription("Control voice transcription for /code threads")
   .addSubcommand((s) => s.setName("status").setDescription("Show voice transcription status"))
-  .addSubcommand(
-    (s) =>
-      s
-        .setName("enable")
-        .setDescription("Enable voice transcription")
-        .addStringOption((o) => o.setName("openai_key").setDescription("OpenAI API key").setRequired(true))
-  )
+  .addSubcommand((s) => s.setName("enable").setDescription("Enable voice transcription (enter key via modal)"))
   .addSubcommand((s) => s.setName("disable").setDescription("Disable voice transcription"));
 
 export async function execute(interaction: ChatInputCommandInteraction): Promise<void> {
   const sub = interaction.options.getSubcommand();
   const config = loadConfig();
   if (!config) {
-    await interaction.reply({ content: "No configuration. Run `ocr setup` first.", ephemeral: true });
+    await interaction.reply({ embeds: [errorEmbed("No configuration", "Run `ocr setup` first.")], ephemeral: true });
     return;
   }
 
@@ -27,26 +22,60 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     const enabled = config.voice.enabled;
     const hasKey = Boolean(config.voice.openaiApiKey);
     await interaction.reply({
-      content: `Voice transcription: **${enabled ? "enabled" : "disabled"}**\nOpenAI key configured: **${hasKey ? "✓" : "never set / redacted"}**`,
+      embeds: [
+        baseEmbed(enabled ? Colors.Green : Colors.Grey)
+          .setTitle("Voice Transcription")
+          .addFields(
+            { name: "Status", value: enabled ? "✅ Enabled" : "⚪ Disabled", inline: true },
+            { name: "OpenAI Key", value: hasKey ? "✅ Configured" : "❌ Not set", inline: true },
+          )
+          .setFooter({ text: "Use /voice enable to set up" }),
+      ],
       ephemeral: true,
     });
     return;
   }
 
   if (sub === "enable") {
-    const key = interaction.options.getString("openai_key", true);
-    config.voice.enabled = true;
-    config.voice.openaiApiKey = key;
-    saveConfig(config);
-    await interaction.reply({ content: "✓ Voice transcription enabled. The key is stored locally in your config.", ephemeral: true });
+    const modal = new ModalBuilder()
+      .setCustomId("voice_key_modal")
+      .setTitle("Configure Voice Transcription");
+
+    const keyInput = new TextInputBuilder()
+      .setCustomId("openai_key_input")
+      .setLabel("OpenAI API Key")
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true)
+      .setPlaceholder("sk-...")
+      .setMinLength(20);
+
+    modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(keyInput));
+    await interaction.showModal(modal);
     return;
   }
 
   if (sub === "disable") {
     config.voice.enabled = false;
     saveConfig(config);
-    await interaction.reply({ content: "Voice transcription disabled.", ephemeral: true });
+    await interaction.reply({ embeds: [successEmbed("Voice transcription disabled")], ephemeral: true });
   }
+}
+
+export async function handleVoiceModalSubmit(interaction: import("discord.js").ModalSubmitInteraction): Promise<void> {
+  const key = interaction.fields.getTextInputValue("openai_key_input");
+  if (!key || key.length < 20) {
+    await interaction.reply({ embeds: [errorEmbed("Invalid key", "The API key looks too short.")], ephemeral: true });
+    return;
+  }
+  const config = loadConfig();
+  if (!config) {
+    await interaction.reply({ embeds: [errorEmbed("No configuration", "Run `ocr setup` first.")], ephemeral: true });
+    return;
+  }
+  config.voice.enabled = true;
+  config.voice.openaiApiKey = key;
+  saveConfig(config);
+  await interaction.reply({ embeds: [successEmbed("Voice transcription enabled", "Your OpenAI key is stored locally in the config file.")], ephemeral: true });
 }
 
 export async function transcribeVoice(audioUrl: string): Promise<string | null> {

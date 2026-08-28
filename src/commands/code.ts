@@ -1,5 +1,6 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, ThreadChannel } from "discord.js";
+import { SlashCommandBuilder, ChatInputCommandInteraction, ThreadChannel, Colors } from "discord.js";
 import { getChannelBinding, saveChannelBinding } from "../storage/index.js";
+import { baseEmbed } from "../discord/ui.js";
 
 export const data = new SlashCommandBuilder()
   .setName("code")
@@ -22,10 +23,18 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   binding.autocodeEnabled = !binding.autocodeEnabled;
   saveChannelBinding(binding);
 
+  const enabled = binding.autocodeEnabled;
   await interaction.reply({
-    content: binding.autocodeEnabled
-      ? "✓ Passthrough mode **enabled**. Messages in this thread now go directly to OpenCode."
-      : "Passthrough mode **disabled**.",
+    embeds: [
+      baseEmbed(enabled ? Colors.Green : Colors.Grey)
+        .setTitle(enabled ? "✓ Passthrough enabled" : "Passthrough disabled")
+        .setDescription(
+          enabled
+            ? "Messages in this thread now go directly to OpenCode."
+            : "Messages in this thread no longer go to OpenCode."
+        )
+        .setFooter({ text: "OpenCode Remote" }),
+    ],
     ephemeral: true,
   });
 }

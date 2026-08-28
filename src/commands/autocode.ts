@@ -1,5 +1,6 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from "discord.js";
+import { SlashCommandBuilder, ChatInputCommandInteraction, Colors } from "discord.js";
 import { getChannelBinding, saveChannelBinding, getProjectState } from "../storage/index.js";
+import { baseEmbed, errorEmbed } from "../discord/ui.js";
 
 export const data = new SlashCommandBuilder()
   .setName("autocode")
@@ -13,13 +14,13 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   const binding = getChannelBinding(interaction.channelId);
 
   if (!binding) {
-    await interaction.reply({ content: "No project bound to this channel. Use `/use` first.", ephemeral: true });
+    await interaction.reply({ embeds: [errorEmbed("No project bound", "Use `/use` first.")], ephemeral: true });
     return;
   }
 
   const state = getProjectState(binding.projectAlias);
   if (!state) {
-    await interaction.reply({ content: `Project \`${binding.projectAlias}\` not found.`, ephemeral: true });
+    await interaction.reply({ embeds: [errorEmbed("Project not found", `\`${binding.projectAlias}\``)], ephemeral: true });
     return;
   }
 
@@ -27,9 +28,16 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   saveChannelBinding(binding);
 
   await interaction.reply({
-    content: enabled
-      ? `✓ Autocode **enabled** for project \`${binding.projectAlias}\`. New threads will auto-send messages to OpenCode.`
-      : `Autocode **disabled** for project \`${binding.projectAlias}\`.`,
+    embeds: [
+      baseEmbed(enabled ? Colors.Green : Colors.Grey)
+        .setTitle(enabled ? "✓ Autocode enabled" : "Autocode disabled")
+        .setDescription(
+          enabled
+            ? `New threads in **${binding.projectAlias}** will auto-send messages to OpenCode.`
+            : `Autocode turned off for **${binding.projectAlias}**.`
+        )
+        .setFooter({ text: "OpenCode Remote" }),
+    ],
     ephemeral: true,
   });
 }

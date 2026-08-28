@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, ThreadChannel, TextChannel } from "discord.js";
+import { SlashCommandBuilder, ChatInputCommandInteraction, AutocompleteInteraction, ThreadChannel, TextChannel } from "discord.js";
 import { getChannelBinding, getThreadSession, loadConfig, isOwner } from "../storage/index.js";
 import { queuePrompt, getCurrentJob } from "../opencode/engine.js";
 import { Icons } from "../discord/ui.js";
@@ -10,7 +10,7 @@ export const data = new SlashCommandBuilder()
     opt.setName("prompt").setDescription("The prompt to send").setRequired(true)
   )
   .addStringOption((opt) =>
-    opt.setName("project").setDescription("Project alias to use").setRequired(false)
+    opt.setName("project").setDescription("Project alias to use").setRequired(false).setAutocomplete(true)
   );
 
 export async function execute(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -81,6 +81,13 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   });
 }
 
-export async function autocomplete(): Promise<void> {
-  // no autocomplete for opencode
+export async function autocomplete(interaction: AutocompleteInteraction): Promise<void> {
+  const config = loadConfig();
+  const projects = config?.projects?.registered ?? [];
+  const focused = interaction.options.getFocused();
+  const choices = projects
+    .filter((p) => p.alias.toLowerCase().includes(focused.toLowerCase()))
+    .slice(0, 25)
+    .map((p) => ({ name: `${p.alias} (${p.path})`, value: p.alias }));
+  await interaction.respond(choices);
 }

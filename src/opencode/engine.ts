@@ -30,16 +30,18 @@ import { getClient } from "../discord/bot.js";
 import { generateId, formatDuration } from "../utils/index.js";
 import { Icons, baseEmbed } from "../discord/ui.js";
 
-let currentJob: { itemId: string; sessionId: string } | null = null;
+let currentJob: { item: import("../types/index.js").QueueItem; sessionId: string; thread: ThreadChannel | undefined } | null = null;
 let cancelling = false;
 let currentStatusMessageId: string | null = null;
-let lastMeaningful: string | null = null;
-let lastMeaningfulTs = 0;
 let startedAt = 0;
 let currentModel = "";
+let streamBuffer = "";
+let toolCalls = new Map<string, { name: string; input?: Record<string, unknown>; output?: string; error?: string }>();
+let lastMeaningful = "";
+let lastMeaningfulTs = 0;
 let paused = false;
 
-export function getCurrentJob(): { itemId: string; sessionId: string } | null {
+export function getCurrentJob(): { item: import("../types/index.js").QueueItem; sessionId: string; thread: ThreadChannel | undefined } | null {
   return currentJob;
 }
 
@@ -115,7 +117,7 @@ export async function pumpQueue(): Promise<void> {
   const queueConf = config.queue || { continueOnFailure: true, freshContext: false };
   const sessionId = !queueConf.freshContext && next.sessionId ? next.sessionId : "";
 
-  currentJob = { itemId: next.id, sessionId };
+  currentJob = { item: next, sessionId, thread: undefined };
   cancelling = false;
   currentStatusMessageId = null;
   startedAt = Date.now();
@@ -161,37 +163,95 @@ async function runPrompt(item: import("../types/index.js").QueueItem): Promise<v
     updateQueueItem(item.id, { sessionId });
   }
 
-  const statusMessage = await sendOrUpdateStatus(thread, sessionId, item);
-  if (statusMessage && !currentStatusMessageId) {
-    currentStatusMessageId = statusMessage.id;
-  }
+  currentJob = { item, sessionId, thread };
+  currentStatusMessageId = null;
+  startedAt = Date.now();
+  currentModel = state?.selectedModel || "default";
+  streamBuffer = "";
+  toolCalls = new Map();
+  cancelling = false;
 
-  const model = state?.selectedModel || undefined;
+  const statusMsg = await sendOrUpdateStatus(thread, sessionId, item);
+  if (statusMsg) currentStatusMessageId = statusMsg.id;
+
+  const modelName = state?.selectedModel || undefined;
 
   const res = await oc.sendPrompt({
     sessionId,
     prompt: item.prompt,
     directory,
-    model,
-    onEvent: (event) => {
-      if (event.type === "finish") {
-        lastMeaningful = event.message || "finished";
-        lastMeaningfulTs = Date.now();
-      }
-      if (event.file) {
-        lastMeaningful = `edited ${event.file.slice(-60)}`;
-        lastMeaningfulTs = Date.now();
-      }
-      if (Date.now() - lastMeaningfulTs < 2000) {
-        void sendOrUpdateStatus(thread, sessionId, item);
-      }
-    },
+    model: modelName,
+    onEvent: (event) => handleStreamEvent(event, thread, sessionId, item),
   });
+
+  currentJob = null;
+  cancelling = false;
 
   if (res.ok) {
     finishJob(item.id, true, res.output);
   } else {
     finishJob(item.id, false, res.error || "OpenCode prompt failed");
+  }
+}
+
+function handleStreamEvent(
+  event: import("./manager.js").PromptEvent,
+  thread: ThreadChannel | undefined,
+  sessionId: string,
+  item: import("../types/index.js").QueueItem
+): void {
+  switch (event.type) {
+    case "token": {
+      if (event.text) streamBuffer += event.text;
+      break;
+    }
+    case "tool_start": {
+      if (event.toolCallId && event.tool) {
+        toolCalls.set(event.toolCallId, { name: event.tool, input: event.toolInput });
+      }
+      break;
+    }
+    case "tool_complete": {
+      if (event.toolCallId) {
+        const tc = toolCalls.get(event.toolCallId);
+        if (tc) tc.output = event.toolOutput;
+      }
+      break;
+    }
+    case "tool_error": {
+      if (event.toolCallId) {
+        const tc = toolCalls.get(event.toolCallId);
+        if (tc) tc.error = event.toolError;
+      }
+      break;
+    }
+    case "diff": {
+      if (event.file && event.diff) {
+        lastMeaningful = `diff ${event.file}`;
+        lastMeaningfulTs = Date.now();
+      }
+      break;
+    }
+    case "finish": {
+      lastMeaningful = event.message || "finished";
+      lastMeaningfulTs = Date.now();
+      break;
+    }
+    case "error": {
+      lastMeaningful = `error: ${event.message?.slice(0, 100)}`;
+      lastMeaningfulTs = Date.now();
+      break;
+    }
+    case "status": {
+      if (event.status === "idle") lastMeaningful = "idle";
+      else if (event.status === "busy") lastMeaningful = "working...";
+      else if (event.status === "retry") lastMeaningful = "retrying...";
+      lastMeaningfulTs = Date.now();
+      break;
+    }
+  }
+  if (Date.now() - lastMeaningfulTs < 3000) {
+    void sendOrUpdateStatus(thread, sessionId, item);
   }
 }
 
@@ -237,17 +297,33 @@ function buildStatusEmbed(sessionId: string, item: import("../types/index.js").Q
     ? `${Icons.fail} Cancelling...`
     : `${Icons.running} Working`;
 
+  const fields = [
+    { name: "Project", value: `\`${item.projectAlias}\``, inline: true },
+    { name: "Model", value: currentModel || state?.selectedModel || "default", inline: true },
+    { name: "Session", value: `\`${sessionId.slice(0, 8)}\``, inline: true },
+    { name: "State", value: statusLine, inline: true },
+    { name: "Elapsed", value: elapsed, inline: true },
+    { name: "Action", value: lastMeaningful ? `\`${lastMeaningful}\`` : "*starting...*", inline: false },
+  ];
+
+  if (streamBuffer) {
+    const preview = streamBuffer.slice(-1500);
+    fields.push({ name: "Output", value: `\`\`\`${preview}\`\`\``, inline: false });
+  }
+
+  if (toolCalls.size > 0) {
+    const toolLines: string[] = [];
+    for (const [_id, tc] of toolCalls) {
+      const status = tc.error ? "✗" : tc.output ? "✓" : "⟳";
+      toolLines.push(`${status} \`${tc.name}\`` + (tc.error ? ` — ${tc.error.slice(0, 60)}` : ""));
+    }
+    fields.push({ name: "Tools", value: toolLines.slice(-5).join("\n"), inline: false });
+  }
+
   return baseEmbed(Colors.Blue)
     .setTitle("OpenCode")
     .setDescription(item.prompt.slice(0, 400) || "*no prompt*")
-    .addFields(
-      { name: "Project", value: `\`${item.projectAlias}\``, inline: true },
-      { name: "Model", value: currentModel || state?.selectedModel || "default", inline: true },
-      { name: "Session", value: `\`${sessionId.slice(0, 8)}\``, inline: true },
-      { name: "State", value: statusLine, inline: true },
-      { name: "Elapsed", value: elapsed, inline: true },
-      { name: "Action", value: lastMeaningful ? `\`${lastMeaningful}\`` : "*starting...*", inline: false }
-    );
+    .addFields(fields);
 }
 
 function buildControls() {
@@ -256,6 +332,11 @@ function buildControls() {
     .setLabel("Stop")
     .setStyle(ButtonStyle.Danger)
     .setEmoji("■");
+  const regen = new ButtonBuilder()
+    .setCustomId("oc_regen")
+    .setLabel("Regenerate")
+    .setStyle(ButtonStyle.Primary)
+    .setEmoji("🔁");
   const cont = new ButtonBuilder()
     .setCustomId("oc_continue")
     .setLabel("Continue")
@@ -269,7 +350,7 @@ function buildControls() {
     .setLabel("Diff")
     .setStyle(ButtonStyle.Secondary);
 
-  return [new ActionRowBuilder<ButtonBuilder>().addComponents(stop, cont, news, diff)];
+  return [new ActionRowBuilder<ButtonBuilder>().addComponents(stop, regen, cont, news, diff)];
 }
 
 function getClientSafe(): Client | null {
@@ -285,8 +366,9 @@ function finishJob(itemId: string, ok: boolean, result: string): void {
   const threadId = getQueueItem(itemId)?.threadId || null;
   currentJob = null;
   currentStatusMessageId = null;
-  lastMeaningful = null;
+  lastMeaningful = "";
   void postCompletion(threadId, ok, result);
+  void pumpQueue();
 }
 
 async function postCompletion(threadId: string | null, ok: boolean, result: string): Promise<void> {

@@ -61,7 +61,12 @@ export async function connect(config: ReturnType<typeof loadConfig>): Promise<{ 
 
   client.on("interactionCreate", async (interaction: Interaction) => {
     try {
-      if (interaction.isButton() || interaction.isStringSelectMenu()) {
+      if (interaction.isModalSubmit()) {
+        if (interaction.customId === "voice_key_modal") {
+          const { handleVoiceModalSubmit } = await import("../commands/voice.js");
+          await handleVoiceModalSubmit(interaction);
+        }
+      } else if (interaction.isButton() || interaction.isStringSelectMenu()) {
         await handleComponent(interaction as unknown as BaseInteraction);
       } else {
         await handleInteraction(interaction);

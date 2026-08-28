@@ -1,6 +1,7 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from "discord.js";
+import { SlashCommandBuilder, ChatInputCommandInteraction, Colors } from "discord.js";
 import { loadConfig, saveConfig } from "../storage/index.js";
 import { checkPort } from "../system/index.js";
+import { baseEmbed, errorEmbed } from "../discord/ui.js";
 
 export const data = new SlashCommandBuilder()
   .setName("setports")
@@ -15,13 +16,13 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   const max = interaction.options.getInteger("max");
 
   if (min !== null && max !== null && min > max) {
-    await interaction.reply({ content: "Range min must be <= max.", ephemeral: true });
+    await interaction.reply({ embeds: [errorEmbed("Invalid range", "Range min must be <= max.")], ephemeral: true });
     return;
   }
 
   const config = loadConfig();
   if (!config) {
-    await interaction.reply({ content: "No configuration. Run `ocr setup` first.", ephemeral: true });
+    await interaction.reply({ embeds: [errorEmbed("No configuration", "Run `ocr setup` first.")], ephemeral: true });
     return;
   }
 
@@ -29,7 +30,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     const check = await checkPort(port);
     if (check.inUse && !portAlreadyOwned(port)) {
       await interaction.reply({
-        content: `Port ${port} is already in use by ${check.processName || check.pid || "unknown"}. Choose another port or free it first.`,
+        embeds: [errorEmbed("Port in use", `Port ${port} is already in use by ${check.processName || check.pid || "unknown"}. Choose another port or free it first.`)],
         ephemeral: true,
       });
       return;
@@ -41,10 +42,15 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
 
   saveConfig(config);
   await interaction.reply({
-    content:
-      `✓ Port config saved.\n` +
-      `Port: \`${config.opencode.port}\`\n` +
-      `Range: \`${config.opencode.portRangeMin ?? "—"}–${config.opencode.portRangeMax ?? "—"}\``,
+    embeds: [
+      baseEmbed(Colors.Green)
+        .setTitle("✓ Port config saved")
+        .addFields(
+          { name: "Port", value: `\`${config.opencode.port}\``, inline: true },
+          { name: "Range", value: `\`${config.opencode.portRangeMin ?? "—"}–${config.opencode.portRangeMax ?? "—"}\``, inline: true },
+        )
+        .setFooter({ text: "OpenCode Remote" }),
+    ],
     ephemeral: true,
   });
 }

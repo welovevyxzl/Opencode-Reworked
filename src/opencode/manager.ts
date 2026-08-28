@@ -324,9 +324,23 @@ export async function cancelSession(sessionId: string): Promise<void> {
 }
 
 export interface PromptEvent {
-  type: string;
-  message?: string;
+  type: "token" | "tool_start" | "tool_complete" | "tool_error" | "diff" | "finish" | "error" | "status";
+  text?: string;
+  tool?: string;
+  toolCallId?: string;
+  toolInput?: Record<string, unknown>;
+  toolOutput?: string;
+  toolError?: string;
   file?: string;
+  diff?: { path: string; diff: string };
+  status?: "idle" | "busy" | "retry";
+  message?: string;
+}
+
+export interface PromptResult {
+  ok: boolean;
+  output: string;
+  error?: string;
 }
 
 let modelIndex: Map<string, { providerID: string }> | null = null;
@@ -367,15 +381,72 @@ export async function sendPrompt(
   const { sessionId, prompt, directory, model } = options;
   const output: string[] = [];
 
-  let evtStream: { stream: AsyncGenerator<unknown> } | null = null;
-  if (options.onEvent) {
+  let evtStream: (AsyncGenerator<unknown> & { return?: (value?: unknown) => Promise<IteratorResult<unknown>> }) | null = null;
+  void (async () => {
     try {
       const evt = await mustClient().event.subscribe({ query: { directory } });
-      evtStream = evt as unknown as { stream: AsyncGenerator<unknown> };
+      evtStream = evt as unknown as (AsyncGenerator<unknown> & { return?: (value?: unknown) => Promise<IteratorResult<unknown>> });
+      for await (const rawEvent of evtStream) {
+        const ge = rawEvent as { directory: string; payload: unknown };
+        const payload = ge.payload as { type: string; properties?: unknown };
+        if (!payload?.type) continue;
+
+        switch (payload.type) {
+          case "message.part.updated": {
+            const p = payload as { properties: { part: { type: string; text?: string; delta?: string; tool?: string; callID?: string; state?: { status: string; input?: Record<string, unknown>; output?: string; error?: string; title?: string }; id?: string } } };
+            const part = p.properties.part;
+            if (part.type === "text" && part.delta) {
+              output.push(part.delta);
+              options.onEvent?.({ type: "token", text: part.delta });
+            } else if (part.type === "tool") {
+              const state = part.state as { status: string; input?: Record<string, unknown>; output?: string; error?: string; title?: string };
+              if (state.status === "pending" || state.status === "running") {
+                options.onEvent?.({
+                  type: "tool_start",
+                  tool: part.tool,
+                  toolCallId: part.callID,
+                  toolInput: state.input,
+                });
+              } else if (state.status === "completed") {
+                options.onEvent?.({
+                  type: "tool_complete",
+                  tool: part.tool,
+                  toolCallId: part.callID,
+                  toolOutput: state.output,
+                });
+              } else if (state.status === "error") {
+                options.onEvent?.({
+                  type: "tool_error",
+                  tool: part.tool,
+                  toolCallId: part.callID,
+                  toolError: state.error,
+                });
+              }
+            }
+            break;
+          }
+          case "session.diff": {
+            const p = payload as { properties: { path: string; diff: string } };
+            options.onEvent?.({ type: "diff", diff: { path: p.properties.path, diff: p.properties.diff } });
+            break;
+          }
+          case "session.status": {
+            const p = payload as { properties: { status: { type: string } } };
+            const statusType = p.properties.status.type;
+            if (statusType === "idle" || statusType === "busy" || statusType === "retry") {
+              options.onEvent?.({ type: "status", status: statusType });
+            }
+            break;
+          }
+          case "permission.updated": {
+            break;
+          }
+        }
+      }
     } catch {
-      evtStream = null;
+      // event stream ended or error
     }
-  }
+  })();
 
   const body: Record<string, unknown> = {
     parts: [{ type: "text", text: prompt }],
@@ -389,6 +460,7 @@ export async function sendPrompt(
       body: body as never,
       query: { directory },
     });
+
     const promptRes = res as unknown as {
       info?: { finish?: string };
       parts?: Array<{ type?: string; text?: string }>;
@@ -397,7 +469,12 @@ export async function sendPrompt(
     if (promptRes && promptRes.parts) {
       for (const part of promptRes.parts) {
         if (part && part.type === "text" && part.text) {
-          output.push(part.text);
+          const fullText = part.text;
+          const alreadyStreamed = output.join("");
+          if (!alreadyStreamed.endsWith(fullText)) {
+            const remaining = fullText.slice(alreadyStreamed.length);
+            if (remaining) output.push(remaining);
+          }
         }
       }
     }
@@ -412,6 +489,7 @@ export async function sendPrompt(
     if (nestedError && typeof nestedError.data?.message === "string") {
       const reason = `OpenCode could not complete the request: ${nestedError.data.message}`;
       logError(`Prompt failed in session ${sessionId}: ${reason}`, "opencode");
+      options.onEvent?.({ type: "error", message: reason });
       return { ok: false, output: output.join("\n"), error: reason };
     }
 
@@ -421,12 +499,17 @@ export async function sendPrompt(
 
     return { ok: true, output: output.join("\n") };
   } catch (err) {
-    logError(`Prompt failed in session ${sessionId}: ${String(err)}`, "opencode");
-    return { ok: false, output: output.join("\n"), error: String(err) };
+    const errMsg = String(err);
+    logError(`Prompt failed in session ${sessionId}: ${errMsg}`, "opencode");
+    options.onEvent?.({ type: "error", message: errMsg });
+    return { ok: false, output: output.join("\n"), error: errMsg };
   } finally {
-    if (evtStream && typeof evtStream.stream.return === "function") {
+    const stream = evtStream as
+      | (AsyncGenerator<unknown> & { return?: (value?: unknown) => Promise<IteratorResult<unknown>> })
+      | null;
+    if (stream && typeof stream.return === "function") {
       try {
-        await evtStream.stream.return(undefined);
+        await stream.return(undefined);
       } catch {
         // ignore
       }
