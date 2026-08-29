@@ -1,10 +1,22 @@
 import { SlashCommandBuilder, ChatInputCommandInteraction, ThreadChannel, Colors } from "discord.js";
-import { getChannelBinding, saveChannelBinding } from "../storage/index.js";
+import { getChannelBinding, saveChannelBinding, markChannelBindingThread, effectiveAutocode } from "../storage/index.js";
 import { baseEmbed } from "../discord/ui.js";
+import type { AutocodeMode } from "../types/index.js";
 
 export const data = new SlashCommandBuilder()
   .setName("code")
-  .setDescription("Toggle passthrough mode (plain messages go to OpenCode) for this thread");
+  .setDescription("Set passthrough mode (plain messages go to OpenCode) for this thread")
+  .addStringOption((opt) =>
+    opt
+      .setName("mode")
+      .setDescription("Passthrough mode for this thread")
+      .setRequired(true)
+      .addChoices(
+        { name: "inherit — follow the parent channel", value: "inherit" },
+        { name: "enabled — passthrough on for this thread", value: "enabled" },
+        { name: "disabled — passthrough off for this thread", value: "disabled" }
+      )
+  );
 
 export async function execute(interaction: ChatInputCommandInteraction): Promise<void> {
   const channel = interaction.channel;
@@ -13,6 +25,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     return;
   }
 
+  const mode = interaction.options.getString("mode", true) as AutocodeMode;
   const parentId = (channel.parentId || interaction.channelId) as string;
   const binding = getChannelBinding(parentId);
   if (!binding) {
@@ -20,19 +33,29 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     return;
   }
 
-  binding.autocodeEnabled = !binding.autocodeEnabled;
-  saveChannelBinding(binding);
+  // Threads get their own explicit override row; parent stays untouched.
+  const threadBinding = getChannelBinding(channel.id) || {
+    channelId: channel.id,
+    projectAlias: binding.projectAlias,
+    autocode: "inherit" as AutocodeMode,
+    threadSessionMap: new Map<string, string>(),
+  };
+  threadBinding.autocode = mode;
+  saveChannelBinding(threadBinding);
+  markChannelBindingThread(channel.id, true);
 
-  const enabled = binding.autocodeEnabled;
+  const effective = effectiveAutocode(channel.id, parentId);
+  const descriptions: Record<AutocodeMode, string> = {
+    inherit: `This thread now **inherits** from the parent channel (currently **${effective ? "on" : "off"}**).`,
+    enabled: "Passthrough is **on for this thread only**. Plain messages here go directly to OpenCode.",
+    disabled: "Passthrough is **off for this thread**, even if the parent channel has it enabled.",
+  };
+
   await interaction.reply({
     embeds: [
-      baseEmbed(enabled ? Colors.Green : Colors.Grey)
-        .setTitle(enabled ? "✓ Passthrough enabled" : "Passthrough disabled")
-        .setDescription(
-          enabled
-            ? "Messages in this thread now go directly to OpenCode."
-            : "Messages in this thread no longer go to OpenCode."
-        )
+      baseEmbed(mode === "enabled" ? Colors.Green : mode === "disabled" ? Colors.Grey : Colors.Blue)
+        .setTitle(mode === "enabled" ? "✓ Passthrough enabled (this thread)" : mode === "disabled" ? "Passthrough disabled (this thread)" : "Passthrough inherits parent (this thread)")
+        .setDescription(descriptions[mode])
         .setFooter({ text: "OpenCode Remote" }),
     ],
     ephemeral: true,

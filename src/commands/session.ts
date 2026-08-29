@@ -12,7 +12,9 @@ import {
   saveThreadSession,
   deleteThreadSession,
   getChannelBinding,
+  getProjectState,
 } from "../storage/index.js";
+import * as qs from "../opencode/queue-service.js";
 import { formatDuration, truncate } from "../utils/index.js";
 import { getDatabaseRows } from "../storage/thrds.js";
 
@@ -23,7 +25,7 @@ export const data = new SlashCommandBuilder()
   .addSubcommand((s) => s.setName("new").setDescription("Create a new session"))
   .addSubcommand((s) => s.setName("attach").setDescription("Attach a session to this thread"))
   .addSubcommand((s) => s.setName("detach").setDescription("Detach this thread from its session"))
-  .addSubcommand((s) => s.setName("info").setDescription("Show current session info"))
+  .addSubcommand((s) => s.setName("info").setDescription("Show full session + ownership info"))
   .addSubcommand((s) => s.setName("delete").setDescription("Delete a session"))
   .addSubcommand((s) =>
     s.setName("rename").setDescription("Rename a session").addStringOption((o) => o.setName("name").setDescription("New name").setRequired(true))
@@ -96,13 +98,14 @@ async function listSessions(interaction: ChatInputCommandInteraction): Promise<v
 async function newSession(interaction: ChatInputCommandInteraction): Promise<void> {
   const binding = getChannelBinding(interaction.channelId);
   const projectAlias = binding?.projectAlias || "default";
-  const session = await oc.createSession(`New session in ${projectAlias}`);
+  const state = getProjectState(projectAlias);
+  const session = await oc.createSession(`New session in ${projectAlias}`, state?.path);
   if (!session) {
     await interaction.reply({ content: "Failed to create session. Is OpenCode running?", ephemeral: true });
     return;
   }
   saveThreadSession(interaction.channelId, session.id, projectAlias, interaction.channelId);
-  await interaction.reply({ content: `✓ Created session \`${session.id}\` and attached it to this thread.`, ephemeral: true });
+  await interaction.reply({ content: `✓ Created session \`${session.id.slice(0, 12)}\` and attached it to this thread.`, ephemeral: true });
 }
 
 async function attachSession(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -141,20 +144,34 @@ async function sessionInfo(interaction: ChatInputCommandInteraction): Promise<vo
     await interaction.reply({ content: "This thread has no session attached.", ephemeral: true });
     return;
   }
-  const sessions = await oc.getSessions();
+  const [sessions, active] = await Promise.all([oc.getSessions(), Promise.resolve(qs.getActiveJob())]);
   const session = sessions.find((s) => s.id === ts.sessionId);
+  const state = getProjectState(ts.projectAlias);
+  const jobsForThread = (await import("../storage/index.js")).getLastJobForThread(interaction.channelId);
+
   const embed = new EmbedBuilder().setColor(Colors.Blue).setFooter({ text: "OpenCode Remote" });
+
   if (session) {
-    embed.setTitle(session.title || "Session");
-    embed.setDescription(`\`${session.id}\``);
-    embed.addFields(
-      { name: "Project", value: ts.projectAlias, inline: true },
-      { name: "Updated", value: relative(session.updated), inline: true }
-    );
+    embed
+      .setTitle(session.title || "Session")
+      .setDescription(`\`${session.id}\``)
+      .addFields(
+        { name: "Project", value: `${ts.projectAlias}${state?.path ? ` (\`${state.path}\`)` : ""}`, inline: false },
+        { name: "Model", value: state?.selectedModel || "default", inline: true },
+        { name: "Directory", value: session.directory ? `\`${session.directory}\`` : "—", inline: true },
+        { name: "Updated", value: relative(session.updated), inline: true },
+        { name: "Status", value: active?.sessionId === ts.sessionId ? `● active (job \`${active.id.slice(0, 8)}\`)` : "idle", inline: true },
+        { name: "Thread binding", value: `<#${interaction.channelId}> → \`${ts.sessionId.slice(0, 12)}\``, inline: false },
+        { name: "Last job", value: jobsForThread ? `\`${jobsForThread.id.slice(0, 8)}\` · ${jobsForThread.status}` : "—", inline: false }
+      );
   } else {
-    embed.setTitle("Session (not found on server)");
-    embed.setDescription(`\`${ts.sessionId}\``);
-    embed.addFields({ name: "Project", value: ts.projectAlias, inline: true });
+    embed
+      .setTitle("Session (missing on server)")
+      .setDescription(`\`${ts.sessionId}\``)
+      .addFields(
+        { name: "Project", value: ts.projectAlias, inline: true },
+        { name: "Recovery", value: "This session no longer exists on the OpenCode server. The next prompt will automatically create and bind a fresh session.", inline: false }
+      );
   }
   await interaction.reply({ embeds: [embed], ephemeral: true });
 }

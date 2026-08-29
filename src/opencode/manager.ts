@@ -4,7 +4,11 @@ import { join, resolve } from "path";
 import { createOpencodeClient, createOpencodeServer, type OpencodeClient } from "@opencode-ai/sdk";
 import { logInfo, logWarn, logError, logDebug } from "../utils/logger.js";
 import { sleep } from "../utils/index.js";
+import { resolveBinary, runCommand } from "../utils/index.js";
 import type { Config } from "../types/index.js";
+import { subscribeSessionEvents, type PromptEvent } from "./events.js";
+
+export type { PromptEvent } from "./events.js";
 
 let client: OpencodeClient | null = null;
 let serverInstance: { url: string; close(): void } | null = null;
@@ -51,41 +55,17 @@ export function getBinaryPath(): string | null {
 async function detectOpenCodeBinary(): Promise<string | null> {
   if (binaryPath && existsSync(binaryPath)) return binaryPath;
 
-  const candidates: string[] = [];
-  if (process.platform === "win32") {
-    const pathDirs = (process.env.PATH || "").split(";").filter((p) => p.length > 0);
-    for (const dir of pathDirs) {
-      for (const shim of [".exe", ".cmd", ""]) {
-        candidates.push(resolve(dir, "opencode" + shim));
-      }
-    }
-    const npmPrefix = spawnSync("npm", ["prefix", "-g"], { encoding: "utf-8", windowsHide: true });
-    if (npmPrefix.status === 0) {
-      const prefix = npmPrefix.stdout.trim();
-      candidates.push(join(prefix, "opencode.cmd"));
-      candidates.push(join(prefix, "opencode.exe"));
-    }
-  } else {
-    const which = spawnSync("which", ["opencode"], { encoding: "utf-8" });
-    if (which.status === 0) candidates.push(which.stdout.trim());
-  }
+  const candidate = resolveBinary("opencode");
+  if (!candidate) return null;
 
-  for (const candidate of candidates) {
-    if (!existsSync(candidate)) continue;
-    try {
-      const isShim = /\.(cmd|bat)$/i.test(candidate);
-      const test = isShim
-        ? spawnSync(`"${candidate}" --version`, { shell: true, encoding: "utf-8", timeout: 10000, windowsHide: true })
-        : spawnSync(candidate, ["--version"], { encoding: "utf-8", timeout: 10000, windowsHide: true });
-      if (test.status === 0) {
-        binaryPath = candidate;
-        logInfo("Found OpenCode binary", "opencode", { path: candidate });
-        return candidate;
-      }
-    } catch {
-      logDebug(`Binary candidate failed version check: ${candidate}`, "opencode");
-    }
+  // Validate the binary actually runs (handles broken shims).
+  const test = await runCommand(candidate, ["--version"], { timeout: 15000 });
+  if (test.code === 0) {
+    binaryPath = candidate;
+    logInfo("Found OpenCode binary", "opencode", { path: candidate });
+    return candidate;
   }
+  logDebug(`Binary candidate failed version check: ${candidate}`, "opencode", { stderr: test.stderr.slice(0, 200) });
   return null;
 }
 
@@ -143,8 +123,8 @@ export async function startServer(): Promise<{ ok: boolean; message: string }> {
   }
 }
 
-export async function diagnosePort(port: number): Promise<string> {
-  const baseUrl = `http://${host}:${port}`;
+export async function diagnosePort(portNumber: number): Promise<string> {
+  const baseUrl = `http://${host}:${portNumber}`;
   const headers: Record<string, string> = {};
   const pass = effectivePassword();
   if (pass) headers.Authorization = basicAuthHeader(pass);
@@ -155,12 +135,12 @@ export async function diagnosePort(port: number): Promise<string> {
       signal: AbortSignal.timeout(3000),
     });
     if (res.status === 401) {
-      return `A server is running on port ${port} but rejected the configured password. It was started separately (e.g. \`opencode\`). Stop it or start it with the same OPENCODE_SERVER_PASSWORD.`;
+      return `A server is running on port ${portNumber} but rejected the configured password. It was started separately (e.g. \`opencode\`). Stop it or start it with the same OPENCODE_SERVER_PASSWORD.`;
     }
     if (res.ok) {
-      return `A compatible OpenCode server is already listening on port ${port}.`;
+      return `A compatible OpenCode server is already listening on port ${portNumber}.`;
     }
-    return `Something is listening on port ${port} (HTTP ${res.status}) but it is not an OpenCode server. Stop that process or set a different port in the config (\`${host}:${port}\`).`;
+    return `Something is listening on port ${portNumber} (HTTP ${res.status}) but it is not an OpenCode server. Stop that process or set a different port in the config (\`${host}:${portNumber}\`).`;
   } catch (err) {
     if (err instanceof Error && /ECONNREFUSED|fetch failed/i.test(err.message)) {
       return `The port seems free, but the OpenCode process exited immediately. See the error above.`;
@@ -226,7 +206,12 @@ export async function isHealthy(): Promise<boolean> {
   try {
     await client!.config.get();
     return true;
-  } catch {
+  } catch (err) {
+    // A 401 from /config means the password does not match the running server.
+    const msg = String(err);
+    if (/401|Unauthorized/i.test(msg)) {
+      logWarn("OpenCode API returned 401 — the configured server password does not match the running OpenCode server.", "opencode");
+    }
     return false;
   }
 }
@@ -295,6 +280,17 @@ export async function getSessions(): Promise<ManagedSession[]> {
   }
 }
 
+/** Whether a session id still exists on the OpenCode server. */
+export async function isSessionAlive(sessionId: string | undefined): Promise<boolean> {
+  if (!sessionId) return false;
+  try {
+    const sessions = await getSessions();
+    return sessions.some((s) => s.id === sessionId);
+  } catch {
+    return false;
+  }
+}
+
 export async function renameSession(sessionId: string, title: string): Promise<boolean> {
   try {
     await mustClient().session.update({ path: { id: sessionId }, body: { title } });
@@ -315,26 +311,15 @@ export async function deleteSession(sessionId: string): Promise<boolean> {
   }
 }
 
-export async function cancelSession(sessionId: string): Promise<void> {
+export async function cancelSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
   try {
     await mustClient().session.abort({ path: { id: sessionId } });
+    return { ok: true };
   } catch (err) {
-    logWarn(`Failed to abort session ${sessionId}: ${String(err)}`, "opencode");
+    const error = String(err);
+    logWarn(`Failed to abort session ${sessionId}: ${error}`, "opencode");
+    return { ok: false, error };
   }
-}
-
-export interface PromptEvent {
-  type: "token" | "tool_start" | "tool_complete" | "tool_error" | "diff" | "finish" | "error" | "status";
-  text?: string;
-  tool?: string;
-  toolCallId?: string;
-  toolInput?: Record<string, unknown>;
-  toolOutput?: string;
-  toolError?: string;
-  file?: string;
-  diff?: { path: string; diff: string };
-  status?: "idle" | "busy" | "retry";
-  message?: string;
 }
 
 export interface PromptResult {
@@ -377,76 +362,21 @@ export async function sendPrompt(
     model?: string;
     onEvent?: (event: PromptEvent) => void;
   }
-): Promise<{ ok: boolean; output: string; error?: string }> {
+): Promise<PromptResult> {
   const { sessionId, prompt, directory, model } = options;
   const output: string[] = [];
 
-  let evtStream: (AsyncGenerator<unknown> & { return?: (value?: unknown) => Promise<IteratorResult<unknown>> }) | null = null;
-  void (async () => {
-    try {
-      const evt = await mustClient().event.subscribe({ query: { directory } });
-      evtStream = evt as unknown as (AsyncGenerator<unknown> & { return?: (value?: unknown) => Promise<IteratorResult<unknown>> });
-      for await (const rawEvent of evtStream) {
-        const ge = rawEvent as { directory: string; payload: unknown };
-        const payload = ge.payload as { type: string; properties?: unknown };
-        if (!payload?.type) continue;
-
-        switch (payload.type) {
-          case "message.part.updated": {
-            const p = payload as { properties: { part: { type: string; text?: string; delta?: string; tool?: string; callID?: string; state?: { status: string; input?: Record<string, unknown>; output?: string; error?: string; title?: string }; id?: string } } };
-            const part = p.properties.part;
-            if (part.type === "text" && part.delta) {
-              output.push(part.delta);
-              options.onEvent?.({ type: "token", text: part.delta });
-            } else if (part.type === "tool") {
-              const state = part.state as { status: string; input?: Record<string, unknown>; output?: string; error?: string; title?: string };
-              if (state.status === "pending" || state.status === "running") {
-                options.onEvent?.({
-                  type: "tool_start",
-                  tool: part.tool,
-                  toolCallId: part.callID,
-                  toolInput: state.input,
-                });
-              } else if (state.status === "completed") {
-                options.onEvent?.({
-                  type: "tool_complete",
-                  tool: part.tool,
-                  toolCallId: part.callID,
-                  toolOutput: state.output,
-                });
-              } else if (state.status === "error") {
-                options.onEvent?.({
-                  type: "tool_error",
-                  tool: part.tool,
-                  toolCallId: part.callID,
-                  toolError: state.error,
-                });
-              }
-            }
-            break;
-          }
-          case "session.diff": {
-            const p = payload as { properties: { path: string; diff: string } };
-            options.onEvent?.({ type: "diff", diff: { path: p.properties.path, diff: p.properties.diff } });
-            break;
-          }
-          case "session.status": {
-            const p = payload as { properties: { status: { type: string } } };
-            const statusType = p.properties.status.type;
-            if (statusType === "idle" || statusType === "busy" || statusType === "retry") {
-              options.onEvent?.({ type: "status", status: statusType });
-            }
-            break;
-          }
-          case "permission.updated": {
-            break;
-          }
-        }
-      }
-    } catch {
-      // event stream ended or error
+  // Session-scoped event stream: events from other sessions in the same
+  // directory are filtered out before they can touch output or UI state.
+  const stopEvents = await subscribeSessionEvents(
+    (query) => mustClient().event.subscribe({ query: { directory: query.directory } }) as never,
+    directory,
+    sessionId,
+    (event) => {
+      if (event.type === "token" && event.text) output.push(event.text);
+      options.onEvent?.(event);
     }
-  })();
+  );
 
   const body: Record<string, unknown> = {
     parts: [{ type: "text", text: prompt }],
@@ -504,16 +434,7 @@ export async function sendPrompt(
     options.onEvent?.({ type: "error", message: errMsg });
     return { ok: false, output: output.join("\n"), error: errMsg };
   } finally {
-    const stream = evtStream as
-      | (AsyncGenerator<unknown> & { return?: (value?: unknown) => Promise<IteratorResult<unknown>> })
-      | null;
-    if (stream && typeof stream.return === "function") {
-      try {
-        await stream.return(undefined);
-      } catch {
-        // ignore
-      }
-    }
+    await stopEvents();
   }
 }
 

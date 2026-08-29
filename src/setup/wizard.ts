@@ -1,5 +1,6 @@
 import { createInterface } from "readline/promises";
 import { stdin, stdout } from "process";
+import { platform } from "os";
 import { existsSync } from "fs";
 import { loadConfig, saveConfig, ensureDataDir, addToAllowlist, initDatabase } from "../storage/index.js";
 import { generateServerPassword } from "../security/auth.js";
@@ -8,6 +9,8 @@ import { isAuthenticated } from "../github/index.js";
 import { deployCommands } from "../discord/bot.js";
 import { logInfo } from "../utils/logger.js";
 import { validateDiscordToken, validateDiscord } from "./validate.js";
+import { enableBootAutostart, disableBootAutostart } from "../platform/autostart.js";
+import type { Config } from "../types/index.js";
 
 let rl: ReturnType<typeof createInterface> | null = null;
 
@@ -99,6 +102,22 @@ export async function runSetup(): Promise<void> {
     process.exit(1);
   }
 
+  const statusChannelId = await promptText("Status channel ID (health alerts; optional)", { required: false });
+  const stallSeconds = await promptText("Stall timeout in seconds (a job with no output this long is failed)", {
+    default: "120",
+    required: true,
+    validator: (v) => (/^\d+$/.test(v) ? null : "Must be a number of seconds."),
+  });
+  const useMaxTimeout = await promptConfirm("Enforce a maximum job duration (cap on the longest single job)", false);
+  let maxTimeoutMs = 0;
+  if (useMaxTimeout) {
+    const mins = await promptText("Max job duration in minutes", {
+      required: true,
+      validator: (v) => (/^\d+$/.test(v) ? null : "Must be a number of minutes."),
+    });
+    maxTimeoutMs = (parseInt(mins as string, 10) || 0) * 60000;
+  }
+
   console.log();
   console.log("  Projects");
   const defaultDir = await promptText("Default projects directory", {
@@ -121,6 +140,15 @@ export async function runSetup(): Promise<void> {
     },
   });
   const autoStart = await promptConfirm("Start OpenCode automatically with the bot", true);
+
+  let bootWithWindows = false;
+  let scheduled = false;
+  if (platform() === "win32") {
+    bootWithWindows = await promptConfirm("Start the bot automatically when the PC logs in", true);
+    if (bootWithWindows) {
+      scheduled = await promptConfirm("Register as a Windows scheduled task (run on login)", true);
+    }
+  }
   const ghEnabled = await promptConfirm("Enable GitHub integration", true);
   const openaiKey = await promptText("OpenAI API key for voice transcription (optional)", { required: false });
   const allowVoice = Boolean(openaiKey);
@@ -167,8 +195,8 @@ export async function runSetup(): Promise<void> {
   }
   console.log("    ✓ Guild access ok");
 
-  const config = {
-    discord: { token, applicationId: appId, guildId, ownerId },
+  const config: Config = {
+    discord: { token, applicationId: appId, guildId, ownerId, statusChannelId: statusChannelId || undefined },
     opencode: {
       port: parseInt(port as string, 10),
       host: "127.0.0.1",
@@ -178,11 +206,27 @@ export async function runSetup(): Promise<void> {
     projects: { defaultDir, registered: [] },
     github: { enabled: ghSetting },
     voice: { enabled: allowVoice, openaiApiKey: openaiKey || undefined },
-    queue: { continueOnFailure: true, freshContext: false },
+    queue: {
+      continueOnFailure: true,
+      freshContext: false,
+      stallTimeoutMs: (parseInt(stallSeconds as string, 10) || 120) * 1000,
+      maxJobTimeoutMs: maxTimeoutMs,
+    },
+    startup: { mode: bootWithWindows ? (scheduled ? "scheduled" : "login") : "disabled", bootWithWindows },
   };
 
   saveConfig(config);
   initDatabase();
+
+  if (platform() === "win32") {
+    const r = bootWithWindows
+      ? enableBootAutostart(scheduled ? "scheduled" : "login")
+      : disableBootAutostart();
+    if (bootWithWindows && r.ok) {
+      console.log(`  ✓ Boot autostart enabled (${r.message.split("Launcher written to ")[1] || "startup folder"})`);
+    }
+  }
+
   addToAllowlist({
     userId: ownerId,
     username: "owner",
@@ -209,6 +253,7 @@ export async function runSetup(): Promise<void> {
   console.log(`    Projects dir: ${defaultDir}`);
   console.log(`    GitHub: ${ghSetting ? "enabled" : "disabled"}`);
   console.log(`    Voice: ${allowVoice ? "enabled" : "disabled"}`);
+  console.log(`    Boot autostart: ${platform() === "win32" && bootWithWindows ? "enabled" : "disabled"}`);
   console.log(`    Secrets stored locally in %USERPROFILE%\\.opencode-remote (never printed)`);
   console.log();
   console.log("  Next: run `ocr start` to launch the bot.");

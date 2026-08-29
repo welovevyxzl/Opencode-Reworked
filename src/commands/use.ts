@@ -25,7 +25,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   const binding = getChannelBinding(interaction.channelId) || {
     channelId: interaction.channelId,
     projectAlias,
-    autocodeEnabled: false,
+    autocode: "inherit",
     threadSessionMap: new Map<string, string>(),
   };
   binding.projectAlias = projectAlias;

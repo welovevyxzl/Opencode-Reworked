@@ -42,9 +42,13 @@ describe("powershell launcher", () => {
 
 describe("binary resolution", () => {
   it("resolves an installed executable from PATH", () => {
+    // git must be present on a dev machine; resolution walks PATH directly
+    // (no shell execution) and returns the candidate or null.
     const git = resolveBinary("git");
-    // git must be present on a dev machine; if it isn't, this cluster would throw
-    // (resolution uses execSync --version which throws when absent)
     expect(git).toBeTruthy();
+  });
+
+  it("returns null instead of throwing for a missing executable", () => {
+    expect(resolveBinary("definitely-not-a-real-binary-xyz")).toBeNull();
   });
 });

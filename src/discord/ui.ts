@@ -1,8 +1,5 @@
-import {
-  EmbedBuilder,
-  Colors,
-  type Message,
-} from "discord.js";
+import { EmbedBuilder, Colors, type Message } from "discord.js";
+import type { JobStatus } from "../types/index.js";
 
 export const Icons = {
   running: "●",
@@ -13,9 +10,7 @@ export const Icons = {
 };
 
 export function baseEmbed(color: number = Colors.Blue): EmbedBuilder {
-  return new EmbedBuilder()
-    .setColor(color)
-    .setFooter({ text: "OpenCode Remote" });
+  return new EmbedBuilder().setColor(color).setFooter({ text: "OpenCode Remote" });
 }
 
 export function successEmbed(title: string, description = ""): EmbedBuilder {
@@ -36,6 +31,34 @@ export function infoEmbed(title: string, description = "") {
 
 export function fieldValue(icon: string, value: string): string {
   return `${icon} ${value}`;
+}
+
+export function jobStatusColor(status: JobStatus): number {
+  switch (status) {
+    case "queued": return Colors.Grey;
+    case "starting": return Colors.Blue;
+    case "running": return Colors.Blue;
+    case "cancelling": return Colors.Orange;
+    case "completed": return Colors.Green;
+    case "failed": return Colors.Red;
+    case "cancelled": return Colors.Grey;
+    case "interrupted": return Colors.Orange;
+    default: return Colors.Blue;
+  }
+}
+
+export function jobStatusLine(status: JobStatus): string {
+  switch (status) {
+    case "queued": return `${Icons.queued} QUEUED`;
+    case "starting": return `${Icons.idle} STARTING`;
+    case "running": return `${Icons.running} RUNNING`;
+    case "cancelling": return "■ CANCELLING";
+    case "completed": return `${Icons.ok} COMPLETED`;
+    case "failed": return `${Icons.fail} FAILED`;
+    case "cancelled": return "CANCELLED";
+    case "interrupted": return "⚠ INTERRUPTED";
+    default: return String(status).toUpperCase();
+  }
 }
 
 export function makeDiffEmbed(diff: string) {

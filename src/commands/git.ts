@@ -1,5 +1,6 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder, Colors, ActionRowBuilder, ButtonBuilder, ButtonStyle } from "discord.js";
-import { getChannelBinding, getProjectState } from "../storage/index.js";
+import { randomBytes } from "crypto";
+import { SlashCommandBuilder, ChatInputCommandInteraction, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, Colors } from "discord.js";
+import { getChannelBinding, getProjectState, savePendingAction } from "../storage/index.js";
 import * as git from "../git/index.js";
 import { Icons } from "../discord/ui.js";
 
@@ -11,8 +12,10 @@ export const data = new SlashCommandBuilder()
   .addSubcommand((s) => s.setName("checkout").setDescription("Checkout a branch").addStringOption((o) => o.setName("branch").setDescription("Branch name").setRequired(true)))
   .addSubcommand((s) => s.setName("pull").setDescription("Pull from remote"))
   .addSubcommand((s) => s.setName("push").setDescription("Push to remote"))
-  .addSubcommand((s) => s.setName("commit").setDescription("Commit staged changes").addStringOption((o) => o.setName("message").setDescription("Commit message").setRequired(true)))
+  .addSubcommand((s) => s.setName("commit").setDescription("Commit changes (confirmed via button)").addStringOption((o) => o.setName("message").setDescription("Commit message").setRequired(true)))
   .addSubcommand((s) => s.setName("log").setDescription("Show recent commits").addIntegerOption((o) => o.setName("count").setDescription("Number of commits").setRequired(false)));
+
+const COMMIT_CONFIRM_TIMEOUT = 10 * 60_000; // commits can wait longer than PC actions
 
 export async function execute(interaction: ChatInputCommandInteraction): Promise<void> {
   const sub = interaction.options.getSubcommand();
@@ -85,6 +88,11 @@ async function doBranch(interaction: ChatInputCommandInteraction, path: string):
 
 async function doCheckout(interaction: ChatInputCommandInteraction, path: string): Promise<void> {
   const branch = interaction.options.getString("branch", true);
+  // Reject branch names that could be interpreted as git options/revisions.
+  if (!/^[a-zA-Z0-9._/-]{1,120}$/.test(branch) || branch.startsWith("-")) {
+    await interaction.reply({ content: `${Icons.fail} Invalid branch name.`, ephemeral: true });
+    return;
+  }
   await interaction.deferReply();
   const res = await git.checkoutBranch(path, branch);
   if (!res.ok) {
@@ -117,6 +125,10 @@ async function doPush(interaction: ChatInputCommandInteraction, path: string): P
 
 async function doCommit(interaction: ChatInputCommandInteraction, path: string): Promise<void> {
   const message = interaction.options.getString("message", true);
+  if (/[\r\n]/.test(message) || message.length > 200) {
+    await interaction.reply({ content: "Message must be a single line, max 200 chars.", ephemeral: true });
+    return;
+  }
   await interaction.deferReply();
   const status = await git.getStatus(path);
   if (!status) {
@@ -128,29 +140,32 @@ async function doCommit(interaction: ChatInputCommandInteraction, path: string):
     return;
   }
 
+  // Durable confirmation in SQLite: survives restarts, single-use, requester-bound.
+  const key = randomBytes(16).toString("hex");
+  savePendingAction({
+    id: key,
+    type: "git:commit",
+    channelId: interaction.channelId,
+    projectAlias: (await import("../storage/index.js")).getChannelBinding(interaction.channelId)?.projectAlias,
+    payloadJson: JSON.stringify({ message }),
+    requesterId: interaction.user.id,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + COMMIT_CONFIRM_TIMEOUT,
+  });
+
   const embed = new EmbedBuilder()
     .setColor(Colors.Blue)
     .setTitle("Will commit")
-    .setFooter({ text: "OpenCode Remote" })
+    .setFooter({ text: `OpenCode Remote · confirm within 10 min · msg: ${message.slice(0, 60)}` })
     .setDescription(
       `**Staged:**\n${status.staged.map((f) => `\`${f}\``).join("\n") || "(none)"}\n\n` +
         `**Modified (not staged):**\n${status.modified.map((f) => `\`${f}\``).join("\n") || "(none)"}\n\n` +
         `**Untracked:**\n${status.untracked.map((f) => `\`${f}\``).join("\n") || "(none)"}`
     );
 
-  const stageAll = new ButtonBuilder().setCustomId("gc_stage_all").setLabel("Stage all & commit").setStyle(ButtonStyle.Primary);
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(stageAll);
+  const confirm = new ButtonBuilder().setCustomId(`gc_commit_${key}`).setLabel("Stage all & commit").setStyle(ButtonStyle.Primary);
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(confirm);
   await interaction.editReply({ embeds: [embed], components: [row] });
-  setPendingCommitMessage(interaction.channelId, message);
-}
-
-const pendingMessages: Record<string, string> = {};
-export function setPendingCommitMessage(channelId: string, message: string): void {
-  pendingMessages[channelId] = message;
-}
-export function popPendingCommitMessage(channelId: string): string | undefined {
-  const msg = pendingMessages[channelId];
-  return msg;
 }
 
 async function doLog(interaction: ChatInputCommandInteraction, path: string): Promise<void> {

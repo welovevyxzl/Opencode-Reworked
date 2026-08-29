@@ -1,8 +1,13 @@
-import { execSync, spawn } from "child_process";
-import { existsSync, statSync } from "fs";
+import { spawn } from "child_process";
+import { existsSync, statSync, readdirSync } from "fs";
 import { join, resolve } from "path";
 
 const SHIMS = [".cmd", ".exe", ".ps1", ""];
+
+// ---------------------------------------------------------------------------
+// Binary resolution — contract: return null when not found; throw only on
+// unexpected filesystem errors. No shell execution during resolution.
+// ---------------------------------------------------------------------------
 
 export function resolveBinary(name: string): string | null {
   if (process.platform === "win32") {
@@ -12,79 +17,86 @@ export function resolveBinary(name: string): string | null {
 }
 
 function resolveUnixBinary(name: string): string | null {
-  try {
-    const result = execSync(`which ${name}`, {
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    if (result && existsSync(result)) {
-      return result;
+  const pathDirs = (process.env.PATH || "").split(":").filter((p) => p.length > 0);
+  for (const dir of pathDirs) {
+    const candidate = resolve(dir, name);
+    try {
+      if (existsSync(candidate) && statSync(candidate).isFile()) {
+        return candidate;
+      }
+    } catch (err) {
+      if (isPermissionError(err)) throw err;
     }
-  } catch {
-    // fallthrough
   }
   return null;
 }
 
-function resolveWindowsBinary(name: string): string {
-  const pathDirs = (process.env.PATH || "")
-    .split(";")
-    .filter((p) => p.length > 0);
+function isPermissionError(err: unknown): boolean {
+  const e = err as NodeJS.ErrnoException;
+  return e?.code === "EACCES" || e?.code === "EPERM";
+}
+
+function resolveWindowsBinary(name: string): string | null {
+  const pathDirs = (process.env.PATH || "").split(";").filter((p) => p.length > 0);
+  const pathExt = (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+  // Prefer real executables over script shims: .EXE first, .CMD last.
+  const extOrder = [...pathExt].sort((a, b) => {
+    const rank = (ext: string) => (ext.toUpperCase() === ".EXE" ? 0 : ext.toUpperCase() === ".COM" ? 1 : ext.toUpperCase() === ".CMD" || ext.toUpperCase() === ".BAT" ? 3 : 2);
+    return rank(a) - rank(b);
+  });
+  const hasExt = /\.[a-z0-9]+$/i.test(name);
 
   for (const dir of pathDirs) {
-    for (const shim of SHIMS) {
-      const candidate = resolve(dir, name + shim);
-      if (existsSync(candidate)) {
-        try {
-          execSync(`"${candidate}" --version`, {
-            encoding: "utf-8",
-            timeout: 10000,
-            stdio: ["pipe", "pipe", "pipe"],
-            windowsHide: true,
-          });
-          return candidate;
-        } catch {
-          continue;
+    try {
+      if (hasExt) {
+        const candidate = resolve(dir, name);
+        if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+      } else {
+        for (const ext of extOrder) {
+          const candidate = resolve(dir, name + ext.toLowerCase());
+          if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+          const upper = resolve(dir, name + ext.toUpperCase());
+          if (upper !== candidate && existsSync(upper) && statSync(upper).isFile()) return upper;
         }
       }
+    } catch (err) {
+      if (isPermissionError(err)) throw err;
     }
-  }
-
-  const npxPath = resolveWindowsNpx(name);
-  if (npxPath) return npxPath;
-
-  throw new Error(
-    `Could not resolve ${name}. Ensure it is installed and available in your PATH.`
-  );
-}
-
-function resolveWindowsNpx(name: string): string | null {
-  try {
-    const npmPrefix = execSync("npm prefix -g", {
-      encoding: "utf-8",
-      timeout: 10000,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    }).trim();
-    const shimPath = join(npmPrefix, name + ".cmd");
-    if (existsSync(shimPath)) {
-      try {
-        execSync(`"${shimPath}" --version`, {
-          encoding: "utf-8",
-          timeout: 10000,
-          stdio: ["pipe", "pipe", "pipe"],
-          windowsHide: true,
-        });
-        return shimPath;
-      } catch {
-        return null;
-      }
-    }
-  } catch {
-    // npm not available
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Windows-safe process spawning
+// ---------------------------------------------------------------------------
+
+/**
+ * Escape a single argument for cmd.exe `/c` invocation. Algorithm mirrors the
+ * battle-tested cross-spawn escaping: quote the argument, then caret-escape
+ * cmd metacharacters. Prevents argument injection through .cmd shims.
+ */
+function escapeWindowsCmdArg(arg: string, doubleEscape = false): string {
+  let s = `${arg}`;
+  // Double up trailing backslashes and escape embedded quotes for the quoted form.
+  s = s.replace(/(\\*)"/g, '$1$1\\"');
+  s = s.replace(/(\\*)$/, "$1$1");
+  s = `"${s}"`;
+  // Caret-escape cmd metacharacters (inside quotes cmd still special-cases some).
+  s = s.replace(/([()\][!^"`%&<>|;,*?=])/g, "^$1");
+  if (doubleEscape) {
+    s = s.replace(/(%)/g, "^$1");
+  }
+  return s;
+}
+
+function isCmdShim(cmd: string): boolean {
+  return process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd);
+}
+
+export interface RunCommandResult {
+  stdout: string;
+  stderr: string;
+  code: number;
 }
 
 export function runCommand(
@@ -95,15 +107,41 @@ export function runCommand(
     timeout?: number;
     env?: Record<string, string>;
   } = {}
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
-      cwd: opts.cwd,
-      timeout: opts.timeout ?? 30000,
-      env: { ...process.env, ...opts.env },
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
+): Promise<RunCommandResult> {
+  // Newlines in arguments enable header/option injection on many CLIs.
+  for (const a of args) {
+    if (/[\r\n]/.test(a)) {
+      return Promise.resolve({
+        stdout: "",
+        stderr: `Rejected argument containing newline: ${a.slice(0, 60)}`,
+        code: 1,
+      });
+    }
+  }
+
+  return new Promise((resolvePromise) => {
+    let child;
+    if (isCmdShim(cmd)) {
+      // Never enable shell:true with user data. Route .cmd/.bat through
+      // cmd.exe with fully escaped arguments instead.
+      const combined = [escapeWindowsCmdArg(cmd), ...args.map((a) => escapeWindowsCmdArg(a))].join(" ");
+      child = spawn("cmd.exe", ["/d", "/s", "/c", combined], {
+        cwd: opts.cwd,
+        timeout: opts.timeout ?? 30000,
+        env: { ...process.env, ...opts.env },
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+        windowsVerbatimArguments: false,
+      });
+    } else {
+      child = spawn(cmd, args, {
+        cwd: opts.cwd,
+        timeout: opts.timeout ?? 30000,
+        env: { ...process.env, ...opts.env },
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      });
+    }
 
     let stdout = "";
     let stderr = "";
@@ -117,11 +155,11 @@ export function runCommand(
     });
 
     child.on("close", (code) => {
-      resolve({ stdout: stdout.trim(), stderr: stderr.trim(), code: code ?? 1 });
+      resolvePromise({ stdout: stdout.trim(), stderr: stderr.trim(), code: code ?? 1 });
     });
 
-    child.on("error", () => {
-      resolve({ stdout: "", stderr: `Failed to start ${cmd}`, code: 1 });
+    child.on("error", (err) => {
+      resolvePromise({ stdout: "", stderr: `Failed to start ${cmd}: ${String(err)}`, code: 1 });
     });
   });
 }
@@ -129,7 +167,7 @@ export function runCommand(
 export function runPowerShell(
   command: string,
   opts: { timeout?: number } = {}
-): Promise<{ stdout: string; stderr: string; code: number }> {
+): Promise<RunCommandResult> {
   return runCommand("powershell.exe", ["-NoProfile", "-Command", command], {
     timeout: opts.timeout ?? 15000,
   });
@@ -166,23 +204,38 @@ export function getMemoryUsage(): { used: number; total: number } {
 }
 
 export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
 export function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export function formatDuration(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  if (hours > 0) return `${hours}h ${minutes % 60}m`;
-  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
-  return `${seconds}s`;
+  const total = Math.floor(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+export function formatClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
 export function truncate(str: string, max: number): string {
   if (str.length <= max) return str;
   return str.slice(0, max - 3) + "...";
+}
+
+/** List files in a directory (non-recursive), throwing fs errors upward. */
+export function listDirSafe(dir: string): string[] {
+  return readdirSync(dir);
 }

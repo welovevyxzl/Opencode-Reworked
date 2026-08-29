@@ -4,6 +4,7 @@ export interface Config {
     applicationId: string;
     guildId: string;
     ownerId: string;
+    statusChannelId?: string;
   };
   opencode: {
     port: number;
@@ -27,6 +28,12 @@ export interface Config {
   queue: {
     continueOnFailure: boolean;
     freshContext: boolean;
+    stallTimeoutMs?: number;
+    maxJobTimeoutMs?: number;
+  };
+  startup: {
+    bootWithWindows: boolean;
+    mode?: "disabled" | "login" | "scheduled";
   };
 }
 
@@ -38,10 +45,15 @@ export interface RegisteredProject {
 export interface ChannelBinding {
   channelId: string;
   projectAlias: string;
-  autocodeEnabled: boolean;
+  /** inherit | enabled | disabled — how this channel/thread treats autocode relative to its parent */
+  autocode: AutocodeMode;
   activeSessionId?: string;
   threadSessionMap: Map<string, string>;
+  /** @deprecated legacy boolean representation */
+  autocodeEnabled?: boolean;
 }
+
+export type AutocodeMode = "inherit" | "enabled" | "disabled";
 
 export interface ProjectState {
   alias: string;
@@ -52,17 +64,47 @@ export interface ProjectState {
   channelBindings: Map<string, ChannelBinding>;
 }
 
+export type JobStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = [
+  "starting",
+  "running",
+  "cancelling",
+] as const;
+
+export type JobKind = "prompt" | "continuation" | "regen" | "task";
+
 export interface QueueItem {
   id: string;
   prompt: string;
+  title?: string;
   channelId: string;
   threadId: string;
   projectAlias: string;
+  directory?: string;
   sessionId?: string;
+  model?: string;
+  kind: JobKind;
+  taskId?: string;
   addedAt: number;
-  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  startedAt?: number;
+  finishedAt?: number;
+  updatedAt?: number;
+  heartbeatAt?: number;
+  attemptCount: number;
+  status: JobStatus;
   result?: string;
   error?: string;
+  lastError?: string;
+  workerId?: string;
 }
 
 export interface AllowlistEntry {
@@ -98,6 +140,7 @@ export interface DoctorCheck {
   name: string;
   status: "ok" | "error" | "warning";
   message: string;
+  fix?: string;
 }
 
 export interface BotState {
@@ -114,4 +157,46 @@ export interface LogEntry {
   message: string;
   context?: string;
   data?: unknown;
+  jobId?: string;
+  event?: string;
+}
+
+/** Autopilot task record (persisted in SQLite). */
+export type TaskMode = "normal" | "autopilot";
+export type TaskStatus =
+  | "pending"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface TaskRecord {
+  id: string;
+  prompt: string;
+  projectAlias: string;
+  directory?: string;
+  channelId?: string;
+  threadId?: string;
+  sessionId?: string;
+  mode: TaskMode;
+  status: TaskStatus;
+  maxIterations: number;
+  iteration: number;
+  /** JSON blob: objective, remaining work, verification snapshot, failure fingerprint */
+  stateJson?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Durable pending component actions (confirmations, commit prompts). */
+export interface PendingAction {
+  id: string;
+  type: string;
+  channelId?: string;
+  projectAlias?: string;
+  payloadJson?: string;
+  requesterId: string;
+  createdAt: number;
+  expiresAt: number;
 }

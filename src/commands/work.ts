@@ -13,7 +13,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   const branch = interaction.options.getString("branch", true);
   const description = interaction.options.getString("description") || branch;
 
-  if (!/^[a-zA-Z0-9._/-]{1,120}$/.test(branch)) {
+  if (!/^[a-zA-Z0-9._/-]{1,120}$/.test(branch) || branch.startsWith("-")) {
     await interaction.reply({ content: "Invalid branch name.", ephemeral: true });
     return;
   }
@@ -44,7 +44,8 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   }
 
   const wtPath = created.path!;
-  const session = await oc.createSession(`Worktree ${branch}`);
+  // The session is created IN the worktree directory.
+  const session = await oc.createSession(`Worktree ${branch}`, wtPath);
   if (!session) {
     await interaction.editReply({ content: `Worktree created at \`${wtPath}\` but OpenCode session failed.` });
     return;
@@ -75,7 +76,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
       `✓ Worktree \`${branch}\` created at \`${wtPath}\`\n` +
       (thread ? `Thread created: ${thread}\n` : "") +
       `Session attached: \`${session.id.slice(0, 8)}\`\n\n` +
-      `Use \`/use project:${binding.projectAlias}\` and set the path to the worktree, or run worktree actions below.`,
+      `Worktree actions below run against this worktree's project binding.`,
     components: [row],
   });
 }

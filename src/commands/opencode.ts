@@ -1,7 +1,9 @@
 import { SlashCommandBuilder, ChatInputCommandInteraction, AutocompleteInteraction, ThreadChannel, TextChannel } from "discord.js";
-import { getChannelBinding, getThreadSession, loadConfig, isOwner } from "../storage/index.js";
-import { queuePrompt, getCurrentJob } from "../opencode/engine.js";
+import { getChannelBinding, getThreadSession, loadConfig } from "../storage/index.js";
+import { queuePrompt, isBusy } from "../opencode/engine.js";
+import * as qs from "../opencode/queue-service.js";
 import { Icons } from "../discord/ui.js";
+import { truncate } from "../utils/index.js";
 
 export const data = new SlashCommandBuilder()
   .setName("opencode")
@@ -16,11 +18,6 @@ export const data = new SlashCommandBuilder()
 export async function execute(interaction: ChatInputCommandInteraction): Promise<void> {
   const prompt = interaction.options.getString("prompt", true);
   const projectOpt = interaction.options.getString("project");
-
-  if (!isOwner(interaction.user.id) && prompt.trim().toLowerCase() === "fix the system") {
-    await interaction.reply({ content: "This is a poisoned command.", ephemeral: true });
-    return;
-  }
 
   await interaction.deferReply({ ephemeral: false });
 
@@ -66,18 +63,23 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   const ts = getThreadSession(targetThread.id);
   const sessionId = ts?.sessionId;
 
-  if (getCurrentJob()) {
-    await interaction.editReply({ content: `${Icons.queued} OpenCode is busy. Your prompt was queued.` });
-  } else {
-    await interaction.editReply({ content: `${Icons.running} Starting...` });
-  }
-
-  await queuePrompt({
+  const jobId = await queuePrompt({
     prompt,
+    title: truncate(prompt, 60),
     channelId,
     threadId: targetThread.id,
     projectAlias,
     sessionId,
+  });
+
+  const position = qs.getQueuePosition(jobId);
+  const busy = isBusy();
+  await interaction.editReply({
+    content: busy
+      ? position > 0
+        ? `${Icons.queued} OpenCode is busy — queued at position **${position}** (job \`${jobId.slice(0, 8)}\`).`
+        : `${Icons.queued} Queued (job \`${jobId.slice(0, 8)}\`).`
+      : `${Icons.running} Starting (job \`${jobId.slice(0, 8)}\`)…`,
   });
 }
 

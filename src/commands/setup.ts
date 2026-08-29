@@ -1,13 +1,15 @@
 import { registerCommand } from "./registry.js";
-import { data as opencodeData, execute as opencodeExecute } from "./opencode.js";
+import { data as opencodeData, execute as opencodeExecute, autocomplete as opencodeAutocomplete } from "./opencode.js";
 import { data as codeData, execute as codeExecute } from "./code.js";
 import { data as autocodeData, execute as autocodeExecute } from "./autocode.js";
-import { data as setpathData, execute as setpathExecute } from "./setpath.js";
+import { data as setpathData, execute as setpathExecute, autocomplete as setpathAutocomplete } from "./setpath.js";
 import { data as projectsData, execute as projectsExecute } from "./projects.js";
 import { data as useData, execute as useExecute, autocomplete as useAutocomplete } from "./use.js";
 import { data as sessionData, execute as sessionExecute } from "./session.js";
 import { data as modelData, execute as modelExecute, autocomplete as modelAutocomplete } from "./model.js";
 import { data as queueData, execute as queueExecute } from "./queue.js";
+import { data as jobData, execute as jobExecute } from "./job.js";
+import { data as taskData, execute as taskExecute, autocomplete as taskAutocomplete } from "./task.js";
 import { data as diffData, execute as diffExecute } from "./diff.js";
 import { data as workData, execute as workExecute } from "./work.js";
 import { data as allowData, execute as allowExecute } from "./allow.js";
@@ -22,17 +24,21 @@ import { data as logsData, execute as logsExecute } from "./logs.js";
 import { data as stopData, execute as stopExecute } from "./stop.js";
 import { data as helpData, execute as helpExecute } from "./help.js";
 import { data as pcData, execute as pcExecute } from "./pc.js";
+import { data as memoryData, execute as memoryExecute } from "./memory.js";
+import { data as remoteData, execute as remoteExecute } from "./remote.js";
 
 export function registerAllCommands(): void {
-  registerCommand({ data: opencodeData, execute: opencodeExecute });
+  registerCommand({ data: opencodeData, execute: opencodeExecute, autocomplete: opencodeAutocomplete });
   registerCommand({ data: codeData, execute: codeExecute });
   registerCommand({ data: autocodeData, execute: autocodeExecute });
-  registerCommand({ data: setpathData, execute: setpathExecute });
+  registerCommand({ data: setpathData, execute: setpathExecute, autocomplete: setpathAutocomplete });
   registerCommand({ data: projectsData, execute: projectsExecute });
   registerCommand({ data: useData, execute: useExecute, autocomplete: useAutocomplete });
   registerCommand({ data: sessionData, execute: sessionExecute });
   registerCommand({ data: modelData, execute: modelExecute, autocomplete: modelAutocomplete });
   registerCommand({ data: queueData, execute: queueExecute });
+  registerCommand({ data: jobData, execute: jobExecute });
+  registerCommand({ data: taskData, execute: taskExecute, autocomplete: taskAutocomplete });
   registerCommand({ data: diffData, execute: diffExecute });
   registerCommand({ data: workData, execute: workExecute });
   registerCommand({ data: allowData, execute: allowExecute });
@@ -47,4 +53,6 @@ export function registerAllCommands(): void {
   registerCommand({ data: stopData, execute: stopExecute });
   registerCommand({ data: helpData, execute: helpExecute });
   registerCommand({ data: pcData, execute: pcExecute });
+  registerCommand({ data: memoryData, execute: memoryExecute });
+  registerCommand({ data: remoteData, execute: remoteExecute });
 }

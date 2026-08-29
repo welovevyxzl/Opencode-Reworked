@@ -1,5 +1,6 @@
 import { disconnect } from "../discord/bot.js";
 import { stopServer, isServerOwned } from "../opencode/manager.js";
+import { shutdownEngine } from "../opencode/engine.js";
 import { closeDatabase } from "../storage/index.js";
 import { logInfo } from "../utils/logger.js";
 
@@ -9,6 +10,13 @@ export async function stopGraceful(): Promise<void> {
   if (stopping) return;
   stopping = true;
   logInfo("Graceful shutdown initiated", "cli");
+
+  try {
+    await shutdownEngine();
+    logInfo("Engine shut down; active job resolved", "cli");
+  } catch (err) {
+    logInfo(`Engine shutdown error: ${err}`, "cli");
+  }
 
   try {
     await disconnect();

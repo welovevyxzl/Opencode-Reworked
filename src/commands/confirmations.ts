@@ -1,11 +1,21 @@
-import { BaseInteraction, ButtonBuilder, ButtonStyle, ActionRowBuilder, type ButtonInteraction } from "discord.js";
+import { randomBytes } from "crypto";
+import { BaseInteraction, ButtonBuilder, ButtonStyle, ActionRowBuilder } from "discord.js";
 import { checkAuth } from "../security/auth.js";
-import { logInfo } from "../utils/logger.js";
-import { sleep, cancelShutdown } from "../system/index.js";
+import { logInfo, logWarn } from "../utils/logger.js";
+import {
+  savePendingAction,
+  getPendingAction,
+  deletePendingAction,
+  cleanupExpiredPendingActions,
+} from "../storage/index.js";
+import { sleep } from "../system/index.js";
 
 const CONFIRM_TIMEOUT = 30000;
 
 export const CONFIRM_TIMEOUT_MS = CONFIRM_TIMEOUT;
+
+/** Pending action types and their Discord custom id prefixes. */
+type ConfirmAction = "sleep" | "restart" | "shutdown";
 
 export function parseConfirmationId(
   customId: string
@@ -15,74 +25,91 @@ export function parseConfirmationId(
   return { action: match[1], choice: match[2], key: match[3] };
 }
 
-interface PendingAction {
-  action: "sleep" | "restart" | "shutdown";
-  userId: string;
-  expiresAt: number;
-}
-
-const pendingActions = new Map<string, PendingAction>();
-
+/**
+ * Register a durable confirmation. The action id is cryptographically random
+ * and the full record (type, requester, expiry) persists in SQLite, so a
+ * restart never leaves broken buttons and ids cannot be guessed or replayed.
+ */
 export async function registerConfirmation(
   interaction: BaseInteraction,
-  action: PendingAction["action"]
+  action: ConfirmAction
 ): Promise<void> {
-  const key = `confirm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  pendingActions.set(key, { action, userId: interaction.user.id, expiresAt: Date.now() + CONFIRM_TIMEOUT });
+  const key = randomBytes(16).toString("hex");
+  savePendingAction({
+    id: key,
+    type: `pc:${action}`,
+    channelId: interaction.channelId ?? undefined,
+    requesterId: interaction.user.id,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + CONFIRM_TIMEOUT,
+  });
 
   const confirm = new ButtonBuilder()
     .setCustomId(`confirm_${action}_yes_${key}`)
     .setLabel("Confirm")
     .setStyle(ButtonStyle.Danger)
-    .setEmoji("✓");
+    .setEmoji("✅");
   const cancel = new ButtonBuilder()
     .setCustomId(`confirm_${action}_no_${key}`)
     .setLabel("Cancel")
     .setStyle(ButtonStyle.Secondary)
-    .setEmoji("×");
+    .setEmoji("❌");
 
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(confirm, cancel);
 
   try {
-    if (interaction.isRepliable() && interaction.replied) {
-      await interaction.editReply({ content: `⚠️ This will **${action.toUpperCase()}** the PC. Confirm within 30s.`, components: [row] });
-    } else if (interaction.isRepliable()) {
-      await interaction.reply({
-        content: `⚠️ This will **${action.toUpperCase()}** the PC. Confirm within 30s.`,
-        components: [row],
-        ephemeral: false,
-      });
+    if (interaction.isRepliable()) {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: `⚠️ This will **${action.toUpperCase()}** the PC. Confirm within 30s.`, components: [row] });
+      } else {
+        await interaction.reply({
+          content: `⚠️ This will **${action.toUpperCase()}** the PC. Confirm within 30s.`,
+          components: [row],
+          ephemeral: false,
+        });
+      }
     }
   } catch (err) {
     logInfo(`Confirmation reply failed: ${err}`, "confirmations");
   }
-  return;
 }
 
+/**
+ * Execute a confirmation button press. Authorization is independently
+ * verified here (owner + original requester) — never trusted from the custom
+ * id. Single-use: the pending action is deleted before executing.
+ */
 export async function handleConfirmAction(interaction: BaseInteraction): Promise<void> {
   if (!interaction.isButton()) return;
 
-  const customId = interaction.customId;
-  const parsed = parseConfirmationId(customId);
+  const parsed = parseConfirmationId(interaction.customId);
   if (!parsed) return;
-
   const { action, choice, key } = parsed;
-  const pending = pendingActions.get(key);
+
+  const pending = getPendingAction(key);
 
   if (!pending) {
-    await interaction.reply({ content: "Confirmation expired or already used.", ephemeral: true }).catch(() => undefined);
+    await interaction.reply({ content: "Confirmation expired, already used, or from a previous bot run. Run the command again.", ephemeral: true }).catch(() => undefined);
     return;
   }
-  pendingActions.delete(key);
+
+  // Single-use: delete first so concurrent clicks cannot double-execute.
+  deletePendingAction(key);
 
   if (Date.now() > pending.expiresAt) {
     await interaction.reply({ content: "Confirmation expired after 30 seconds. Run the command again.", ephemeral: true }).catch(() => undefined);
     return;
   }
 
+  // Independent authorization check at the execution layer.
   const auth = checkAuth(interaction.user.id);
   if (!auth.authorized || !auth.owner) {
     await interaction.reply({ content: "Only the owner can control the PC.", ephemeral: true }).catch(() => undefined);
+    return;
+  }
+  // Only the requester may confirm their own destructive action.
+  if (pending.requesterId !== interaction.user.id) {
+    await interaction.reply({ content: "Only the user who started this action can confirm it.", ephemeral: true }).catch(() => undefined);
     return;
   }
 
@@ -91,9 +118,9 @@ export async function handleConfirmAction(interaction: BaseInteraction): Promise
     return;
   }
 
-  await interaction.update({ content: `Putting PC to sleep...`, components: [] }).catch(() => undefined);
+  await interaction.update({ content: `Executing **${action}**...`, components: [] }).catch(() => undefined);
 
-  switch (action) {
+  switch (action as ConfirmAction) {
     case "sleep":
       channelBroadcast(interaction, "Putting PC to sleep...");
       await sleep();
@@ -104,7 +131,14 @@ export async function handleConfirmAction(interaction: BaseInteraction): Promise
     case "shutdown":
       await shutdownPC(interaction);
       break;
+    default:
+      logWarn(`Unknown confirm action ${action}`, "confirmations");
   }
+}
+
+/** Remove expired pending actions (called periodically + at startup). */
+export function purgeExpiredConfirmations(): number {
+  return cleanupExpiredPendingActions();
 }
 
 function channelBroadcast(interaction: BaseInteraction, content: string): void {
@@ -114,24 +148,24 @@ function channelBroadcast(interaction: BaseInteraction, content: string): void {
   }
 }
 
-async function restartPC(interaction: ButtonInteraction): Promise<void> {
+async function restartPC(interaction: BaseInteraction): Promise<void> {
   const { restart } = await import("../system/index.js");
-  channelBroadcast(interaction, "Restarting PC in 15 seconds...");
+  channelBroadcast(interaction, "Restarting PC...");
   const res = await restart();
   if (!res.ok) {
-    await interaction.followUp({ content: `Restart failed: ${res.error}`, ephemeral: true }).catch(() => undefined);
+    await (interaction as import("discord.js").ButtonInteraction)
+      .followUp({ content: `Restart failed: ${res.error}`, ephemeral: true })
+      .catch(() => undefined);
   }
 }
 
-async function shutdownPC(interaction: ButtonInteraction): Promise<void> {
+async function shutdownPC(interaction: BaseInteraction): Promise<void> {
   const { shutdown } = await import("../system/index.js");
-  channelBroadcast(interaction, "Shutting down PC in 15 seconds...");
+  channelBroadcast(interaction, "Shutting down PC...");
   const res = await shutdown();
   if (!res.ok) {
-    await interaction.followUp({ content: `Shutdown failed: ${res.error}`, ephemeral: true }).catch(() => undefined);
+    await (interaction as import("discord.js").ButtonInteraction)
+      .followUp({ content: `Shutdown failed: ${res.error}`, ephemeral: true })
+      .catch(() => undefined);
   }
-}
-
-export async function cancelPendingShutdown(): Promise<void> {
-  await cancelShutdown();
 }

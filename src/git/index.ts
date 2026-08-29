@@ -1,7 +1,13 @@
 import { runCommand } from "../utils/index.js";
 import type { GitStatus } from "../types/index.js";
-import { writeFileSync, existsSync } from "fs";
+import { writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
+import { homedir } from "os";
+import { randomBytes } from "crypto";
+
+// Unit Separator (\x1f) — a control character that cannot appear in commit
+// subjects or author names, unlike "|" which collides constantly.
+export const GIT_LOG_SEPARATOR = "\u001f";
 
 export async function gitCommand(
   cwd: string,
@@ -80,10 +86,7 @@ export async function getDiff(
 }
 
 export async function diffToFile(cwd: string, diff: string): Promise<string> {
-  const { writeFileSync, mkdirSync } = await import("fs");
-  const { join } = await import("path");
-  const { homedir } = await import("os");
-  const { randomBytes } = await import("crypto");
+  void cwd;
   const dir = join(homedir(), ".opencode-remote", "state");
   mkdirSync(dir, { recursive: true });
   const file = join(dir, `diff-${Date.now()}-${randomBytes(4).toString("hex")}.diff`);
@@ -148,17 +151,33 @@ export async function pull(cwd: string): Promise<{ ok: boolean; error?: string }
   return { ok: true };
 }
 
-export async function log(cwd: string, max = 10): Promise<Array<{ hash: string; message: string; author: string; date: string }>> {
+export interface CommitEntry {
+  hash: string;
+  message: string;
+  author: string;
+  date: string;
+}
+
+/** Parse one `git log` line using the unit-separator format. */
+export function parseLogLine(line: string): CommitEntry | null {
+  const parts = line.split(GIT_LOG_SEPARATOR);
+  if (parts.length < 4) return null;
+  const [hash, message, author, date] = parts;
+  if (!hash) return null;
+  return { hash, message, author, date };
+}
+
+export async function log(cwd: string, max = 10): Promise<CommitEntry[]> {
   const res = await gitCommand(
     cwd,
-    ["log", `-${max}`, "--pretty=format:%h|%s|%an|%ar"],
+    ["log", `-${max}`, `--pretty=format:%h${GIT_LOG_SEPARATOR}%s${GIT_LOG_SEPARATOR}%an${GIT_LOG_SEPARATOR}%ar`],
     5000
   );
   if (!res.ok) return [];
-  return res.stdout.split("\n").map((line) => {
-    const [hash, message, author, date] = line.split("|");
-    return { hash, message, author, date };
-  }).filter((e) => e.hash);
+  return res.stdout
+    .split("\n")
+    .map(parseLogLine)
+    .filter((e): e is CommitEntry => e !== null);
 }
 
 export async function stageAll(cwd: string): Promise<{ ok: boolean; error?: string }> {

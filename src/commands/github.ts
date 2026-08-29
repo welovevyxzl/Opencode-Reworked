@@ -6,9 +6,9 @@ import { Icons } from "../discord/ui.js";
 
 export const data = new SlashCommandBuilder()
   .setName("github")
-  .setDescription("GitHub integration via gh CLI")
+  .setDescription("GitHub integration via gh CLI (operates on the bound project)")
   .addSubcommand((s) => s.setName("status").setDescription("Show GitHub auth status"))
-  .addSubcommand((s) => s.setName("repo").setDescription("Show current repository"))
+  .addSubcommand((s) => s.setName("repo").setDescription("Show the repository for the bound project"))
   .addSubcommand((s) =>
     s
       .setName("create")
@@ -20,12 +20,12 @@ export const data = new SlashCommandBuilder()
   .addSubcommand((s) =>
     s
       .setName("pr")
-      .setDescription("Create a pull request")
+      .setDescription("Create a pull request in the bound project")
       .addStringOption((o) => o.setName("title").setDescription("PR title").setRequired(true))
       .addStringOption((o) => o.setName("body").setDescription("PR body").setRequired(false))
       .addStringOption((o) => o.setName("base").setDescription("Base branch").setRequired(false))
   )
-  .addSubcommand((s) => s.setName("prs").setDescription("List pull requests"));
+  .addSubcommand((s) => s.setName("prs").setDescription("List pull requests for the bound project"));
 
 export async function execute(interaction: ChatInputCommandInteraction): Promise<void> {
   const sub = interaction.options.getSubcommand();
@@ -59,7 +59,9 @@ async function ghStatus(interaction: ChatInputCommandInteraction): Promise<void>
 
 async function ghRepo(interaction: ChatInputCommandInteraction): Promise<void> {
   await interaction.deferReply();
-  const res = await gh.getRepoInfo();
+  const path = await projectPath(interaction);
+  if (!path) return;
+  const res = await gh.getRepoInfo(path);
   const embed = new EmbedBuilder().setColor(Colors.Blue).setTitle("GitHub repo").setFooter({ text: "OpenCode Remote" });
   if (res.ok && res.repo) {
     embed.addFields(
@@ -114,7 +116,8 @@ async function ghCreate(interaction: ChatInputCommandInteraction): Promise<void>
     }
   }
 
-  const create = await gh.createRepo(name, { visibility });
+  // createRepo now receives the project directory explicitly — no cwd reliance.
+  const create = await gh.createRepo(state.path, name, { visibility });
   if (!create.ok) {
     await interaction.editReply({ content: `${Icons.fail} ${create.error}` });
     return;
@@ -141,7 +144,10 @@ async function ghPr(interaction: ChatInputCommandInteraction): Promise<void> {
   const body = interaction.options.getString("body") ?? undefined;
   const base = interaction.options.getString("base") ?? undefined;
   await interaction.deferReply();
-  const res = await gh.createPullRequest({ title, body, base });
+  const path = await projectPath(interaction);
+  if (!path) return;
+  const branch = await git.getCurrentBranch(path);
+  const res = await gh.createPullRequest(path, { title, body, base, head: branch });
   if (!res.ok) {
     await interaction.editReply({ content: `${Icons.fail} ${res.error}` });
     return;
@@ -151,7 +157,9 @@ async function ghPr(interaction: ChatInputCommandInteraction): Promise<void> {
 
 async function ghPrs(interaction: ChatInputCommandInteraction): Promise<void> {
   await interaction.deferReply();
-  const prs = await gh.listPullRequests();
+  const path = await projectPath(interaction);
+  if (!path) return;
+  const prs = await gh.listPullRequests(path);
   if (prs.length === 0) {
     await interaction.editReply({ content: "No open PRs." });
     return;
@@ -159,4 +167,18 @@ async function ghPrs(interaction: ChatInputCommandInteraction): Promise<void> {
   const embed = new EmbedBuilder().setColor(Colors.Blue).setTitle(`Pull requests (${prs.length})`).setFooter({ text: "OpenCode Remote" });
   embed.setDescription(prs.slice(0, 15).map((p) => `#${p.number} **${p.title}**\n${p.url}`).join("\n\n"));
   await interaction.editReply({ embeds: [embed] });
+}
+
+async function projectPath(interaction: ChatInputCommandInteraction): Promise<string | null> {
+  const binding = getChannelBinding(interaction.channelId);
+  if (!binding) {
+    await interaction.editReply({ content: "No project bound. Use `/use`." });
+    return null;
+  }
+  const state = getProjectState(binding.projectAlias);
+  if (!state?.path) {
+    await interaction.editReply({ content: `Project \`${binding.projectAlias}\` not found.` });
+    return null;
+  }
+  return state.path;
 }

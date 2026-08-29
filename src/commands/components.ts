@@ -1,19 +1,25 @@
-import { BaseInteraction, MessagePayload, MessageCreateOptions } from "discord.js";
-import { loadConfig, getChannelBinding, getThreadSession } from "../storage/index.js";
+import { BaseInteraction, MessagePayload, MessageCreateOptions, ActionRowBuilder, ButtonBuilder, ButtonStyle } from "discord.js";
+import { getChannelBinding, getThreadSession, getProjectState, getPendingAction, deletePendingAction, deleteThreadSession } from "../storage/index.js";
 import { logWarn } from "../utils/logger.js";
 import { checkAuth } from "../security/auth.js";
-import { stopCurrentJob, queuePrompt, getCurrentJob } from "../opencode/engine.js";
-import { deleteThreadSession } from "../storage/index.js";
-import { deleteSession } from "../opencode/manager.js";
+import { queuePrompt, getEngineStatus } from "../opencode/engine.js";
+import * as qs from "../opencode/queue-service.js";
 import { getDiff as gitGetDiff, diffToFile, stageAll, commit, push, getCurrentBranch, deleteWorktree } from "../git/index.js";
 import { createPullRequest } from "../github/index.js";
 import { handleConfirmAction } from "./confirmations.js";
 
 async function loadProjectForInteraction(interaction: BaseInteraction) {
-  const { getProjectState } = await import("../storage/index.js");
   if (!interaction.channelId) return null;
+  // In a thread, the project comes from the parent binding (or the thread's
+  // own session mapping when the thread was created by /opencode).
+  const ts = getThreadSession(interaction.channelId);
+  if (ts) {
+    const bySession = getProjectState(ts.projectAlias);
+    if (bySession) return bySession;
+  }
   const binding = getChannelBinding(interaction.channelId);
-  return binding ? getProjectState(binding.projectAlias) : null;
+  if (binding) return getProjectState(binding.projectAlias);
+  return null;
 }
 
 export function registerComponentHandlers(): void {
@@ -26,9 +32,19 @@ function channelSend(channel: BaseInteraction["channel"], payload: string | (Mes
   }
 }
 
+/** Post-completion action row: regenerate (stored prompt) + continue same session. */
+export function buildPostRunControls(): ActionRowBuilder<ButtonBuilder>[] {
+  const regen = new ButtonBuilder().setCustomId("oc_regen").setLabel("Regenerate").setStyle(ButtonStyle.Primary);
+  const cont = new ButtonBuilder().setCustomId("oc_continue").setLabel("Continue").setStyle(ButtonStyle.Primary);
+  const news = new ButtonBuilder().setCustomId("oc_new").setLabel("New Session").setStyle(ButtonStyle.Secondary);
+  const diff = new ButtonBuilder().setCustomId("oc_diff").setLabel("Diff").setStyle(ButtonStyle.Secondary);
+  return [new ActionRowBuilder<ButtonBuilder>().addComponents(regen, cont, news, diff)];
+}
+
 export async function handleComponent(interaction: BaseInteraction): Promise<void> {
   if (!interaction.isButton() && !interaction.isStringSelectMenu()) return;
 
+  // Authorization is verified here, independently of command routing.
   const auth = checkAuth(interaction.user.id);
   if (!auth.authorized) {
     if (interaction.isRepliable()) {
@@ -46,15 +62,17 @@ export async function handleComponent(interaction: BaseInteraction): Promise<voi
 
   if (id === "oc_stop") {
     await interaction.deferUpdate().catch(() => undefined);
+    const { stopCurrentJob } = await import("../opencode/engine.js");
     const res = await stopCurrentJob();
-    await interaction.followUp({ content: res.ok ? "Stopping..." : res.message, ephemeral: true }).catch(() => undefined);
+    await interaction.followUp({ content: res.ok ? "Stopping…" : res.message, ephemeral: true }).catch(() => undefined);
     return;
   }
 
   if (id === "oc_regen") {
     await interaction.deferUpdate().catch(() => undefined);
-    if (getCurrentJob()) {
-      await interaction.followUp({ content: "A task is already running.", ephemeral: true }).catch(() => undefined);
+    const engine = getEngineStatus();
+    if (engine.running) {
+      await interaction.followUp({ content: "A task is already running — stop it first to regenerate.", ephemeral: true }).catch(() => undefined);
       return;
     }
     const ts = getThreadSession(interaction.channelId);
@@ -62,15 +80,32 @@ export async function handleComponent(interaction: BaseInteraction): Promise<voi
       await interaction.followUp({ content: "No session attached to this thread.", ephemeral: true }).catch(() => undefined);
       return;
     }
-    // Re-queue the last prompt - we'd need to store it. For now, ask user to re-prompt.
-    await interaction.followUp({ content: "Regenerate: please send your prompt again, or use Continue.", ephemeral: true }).catch(() => undefined);
+    // The original prompt is stored on the job; regenerate it in a FRESH
+    // context (drop the existing thread→session binding so the engine creates
+    // a new session from the stored prompt).
+    const { getLastJobForThread } = await import("../storage/index.js");
+    const lastJob = getLastJobForThread(interaction.channelId);
+    if (!lastJob) {
+      await interaction.followUp({ content: "No previous prompt found for this thread.", ephemeral: true }).catch(() => undefined);
+      return;
+    }
+    deleteThreadSession(interaction.channelId);
+    await queuePrompt({
+      prompt: lastJob.prompt,
+      title: lastJob.title || "Regenerate",
+      channelId: interaction.channelId,
+      threadId: interaction.channelId,
+      projectAlias: ts.projectAlias,
+      kind: "regen",
+    });
+    await interaction.followUp({ content: `Regenerating the original prompt in a fresh session (job queued).`, ephemeral: true }).catch(() => undefined);
     return;
   }
 
   if (id === "oc_continue") {
     await interaction.deferUpdate().catch(() => undefined);
     if (!interaction.isButton()) return;
-    if (getCurrentJob()) {
+    if (getEngineStatus().running) {
       await interaction.followUp({ content: "A task is already running.", ephemeral: true }).catch(() => undefined);
       return;
     }
@@ -79,28 +114,31 @@ export async function handleComponent(interaction: BaseInteraction): Promise<voi
       await interaction.followUp({ content: "No session attached to this thread. Use Continue only on an OpenCode thread.", ephemeral: true }).catch(() => undefined);
       return;
     }
-    void queuePrompt({
+    // Continue the SAME OpenCode session — context preserved.
+    await queuePrompt({
       prompt: "Continue with the current task. Pick up where you left off and keep going.",
+      title: "Continue",
       channelId: interaction.channelId,
       threadId: interaction.channelId,
       projectAlias: ts.projectAlias,
       sessionId: ts.sessionId,
+      kind: "continuation",
     });
-    await interaction.followUp({ content: "Continuation queued.", ephemeral: true }).catch(() => undefined);
+    await interaction.followUp({ content: `Continuation queued on session \`${ts.sessionId.slice(0, 8)}\`.`, ephemeral: true }).catch(() => undefined);
     return;
   }
 
   if (id === "oc_new") {
     await interaction.deferUpdate().catch(() => undefined);
     deleteThreadSession(interaction.channelId);
-    await interaction.followUp({ content: "New session. Next prompt will create a fresh context.", ephemeral: true }).catch(() => undefined);
+    await interaction.followUp({ content: "Fresh session: the next prompt in this thread will start a brand-new OpenCode context. This thread's previous session is left on the server (delete it via `/session delete` if wanted).", ephemeral: true }).catch(() => undefined);
     return;
   }
 
   if (id === "oc_diff") {
     await interaction.deferUpdate().catch(() => undefined);
     const state = await loadProjectForInteraction(interaction);
-    if (!state) {
+    if (!state?.path) {
       await interaction.followUp({ content: "No project bound to this channel.", ephemeral: true }).catch(() => undefined);
       return;
     }
@@ -110,22 +148,33 @@ export async function handleComponent(interaction: BaseInteraction): Promise<voi
       return;
     }
     const file = await diffToFile(state.path, res.output);
-    channelSend(interaction.channel, { content: "Git diff:", files: [file] });
+    channelSend(interaction.channel, { content: `Git diff for \`${state.alias}\`:`, files: [file] });
     await interaction.followUp({ content: "Diff attached.", ephemeral: true }).catch(() => undefined);
     return;
   }
 
-  if (id === "gc_stage_all") {
+  if (id.startsWith("gc_commit_")) {
+    // Durable commit confirmation: message stored in pending_actions.
     if (!interaction.isButton()) return;
     await interaction.deferUpdate().catch(() => undefined);
-    const binding = getChannelBinding(interaction.channelId);
-    const state = binding ? (await loadProjectForInteraction(interaction)) : null;
+    const key = id.slice("gc_commit_".length);
+    const pending = getPendingAction(key);
+    if (!pending || pending.type !== "git:commit" || Date.now() > pending.expiresAt) {
+      if (pending) deletePendingAction(key);
+      await interaction.followUp({ content: "That commit confirmation expired. Run `/git commit` again.", ephemeral: true }).catch(() => undefined);
+      return;
+    }
+    deletePendingAction(key);
+    if (pending.requesterId !== interaction.user.id) {
+      await interaction.followUp({ content: "Only the user who started the commit can confirm it.", ephemeral: true }).catch(() => undefined);
+      return;
+    }
+    const message = pending.payloadJson ? (JSON.parse(pending.payloadJson) as { message: string }).message : "Commit";
+    const state = await loadProjectForInteraction(interaction);
     if (!state?.path) {
       await interaction.followUp({ content: "No project bound.", ephemeral: true }).catch(() => undefined);
       return;
     }
-    const { popPendingCommitMessage } = await import("./git.js");
-    const message = popPendingCommitMessage(interaction.channelId) || "Commit";
     const stageRes = await stageAll(state.path);
     if (!stageRes.ok) {
       await interaction.followUp({ content: `× Failed to stage: ${stageRes.error}`, ephemeral: true }).catch(() => undefined);
@@ -154,7 +203,7 @@ export async function handleComponent(interaction: BaseInteraction): Promise<voi
     const binding = getChannelBinding(interaction.channelId) || {
       channelId: interaction.channelId,
       projectAlias,
-      autocodeEnabled: false,
+      autocode: "inherit" as const,
       threadSessionMap: new Map(),
     };
     binding.projectAlias = projectAlias;
@@ -175,16 +224,9 @@ export async function handleComponent(interaction: BaseInteraction): Promise<voi
   if (id === "sb_session_delete") {
     if (!interaction.isStringSelectMenu()) return;
     const sessionId = interaction.values[0];
+    const { deleteSession } = await import("../opencode/manager.js");
     const ok = await deleteSession(sessionId);
     await interaction.reply({ content: ok ? `Deleted session \`${sessionId.slice(0, 8)}…\`.` : "Failed to delete session.", ephemeral: true });
-    return;
-  }
-
-  if (id.startsWith("sb_session_")) {
-    if (!interaction.isStringSelectMenu()) return;
-    const sessionId = interaction.values[0].replace("sb_session_", "");
-    await attachSession(interaction.channelId, sessionId);
-    await interaction.reply({ content: `Attached session \`${sessionId}\`.`, ephemeral: true });
     return;
   }
 
@@ -232,8 +274,7 @@ async function attachSession(threadId: string, sessionId: string) {
 }
 
 async function handleWorktreeButton(id: string, interaction: any): Promise<void> {
-  const binding = getChannelBinding(interaction.channelId);
-  const state = binding ? (await loadProjectForInteraction(interaction)) : null;
+  const state = await loadProjectForInteraction(interaction);
   if (!state?.path) {
     await interaction.followUp({ content: "No project bound.", ephemeral: true }).catch(() => undefined);
     return;
@@ -275,7 +316,7 @@ async function handleWorktreeButton(id: string, interaction: any): Promise<void>
     }
     case "wb_pr": {
       const branch = await getCurrentBranch(state.path);
-      const res = await createPullRequest({ title: `Work: ${branch}`, head: branch });
+      const res = await createPullRequest(state.path, { title: `Work: ${branch}`, head: branch });
       if (!res.ok) {
         await interaction.followUp({ content: `× ${res.error}`, ephemeral: true }).catch(() => undefined);
       } else {
@@ -296,7 +337,7 @@ async function handleWorktreeButton(id: string, interaction: any): Promise<void>
 }
 
 async function loadDefaultProject(): Promise<string | null> {
-  const config = loadConfig();
+  const config = (await import("../storage/index.js")).loadConfig();
   if (config?.projects.registered[0]) return config.projects.registered[0].alias;
   return null;
 }

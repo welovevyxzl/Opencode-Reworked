@@ -9,6 +9,8 @@ import { runDoctor } from "./doctor.js";
 import { deploySlashCommands, undeploySlashCommands } from "./deploy.js";
 import { showConfig } from "./showconfig.js";
 import { updateApp } from "./update.js";
+import { handleAutostart } from "./autostart.js";
+import { formatBuildSummary } from "../utils/build-info.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let pkg: { version?: string } = {};
@@ -60,9 +62,12 @@ async function main(): Promise<void> {
     case "update":
       await updateApp();
       break;
+    case "autostart":
+      await handleAutostart(sub as "login" | "scheduled" | "enable" | "disable" | "status" | undefined);
+      break;
     case "--version":
     case "-v":
-      console.log(VERSION);
+      console.log(formatBuildSummary());
       break;
     case "--help":
     case "-h":
@@ -81,6 +86,7 @@ function banner(): string {
     "",
     "  OpenCode Remote",
     "  A reliable Discord remote-control for OpenCode",
+    `  ${formatBuildSummary()}`,
     "",
   ].join("\n");
 }
@@ -92,13 +98,14 @@ function printUsage(): void {
     setup       Interactive setup wizard
     start       Start the bot (default when no command given)
     stop        Stop the running bot
-    restart     Restart the bot
-    status      Show bot status
+    restart     Restart the bot (rebuilds first if src/ is newer than dist/)
+    status      Show bot, build, project, and queue status
     doctor      Run diagnostics
     deploy      Deploy slash commands to Discord
     undeploy    Remove slash commands from Discord
     config      Show current configuration (values redacted)
     update      Check for updates
+    autostart   Windows startup: login | scheduled | disable | status
     help        Show this help`);
 }
 

@@ -38,6 +38,13 @@ export async function handleInteraction(
     }
   }
 
+  if (interaction.commandName === "remote") {
+    if (!auth.owner) {
+      await interaction.reply({ content: "Only the owner can view remote access info.", ephemeral: true });
+      return;
+    }
+  }
+
   if (interaction.commandName === "pc") {
     if (!auth.owner) {
       await interaction.reply({ content: "Only the owner can control the PC.", ephemeral: true });

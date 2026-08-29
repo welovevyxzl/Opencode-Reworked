@@ -3,6 +3,7 @@ import {
   getChannelBinding,
   loadConfig,
   getThreadSession,
+  effectiveAutocode,
   isAuthorized,
 } from "../storage/index.js";
 import { queuePrompt } from "../opencode/engine.js";
@@ -21,30 +22,30 @@ export async function handleMessage(message: Message): Promise<void> {
   const thread = channel instanceof ThreadChannel ? channel : null;
   if (!thread) return;
 
-  const binding = getChannelBinding(channel.id);
-  const parentBinding = thread.parentId ? getChannelBinding(thread.parentId) : null;
+  // Explicit inheritance: thread setting → parent channel → disabled.
+  const enabled = effectiveAutocode(thread.id, thread.parentId ?? null);
+  if (!enabled) return;
 
-  const autocodeEnabled =
-    binding?.autocodeEnabled ||
-    (parentBinding?.autocodeEnabled ?? false);
-
-  const useBinding = binding || parentBinding;
-  if (!useBinding) return;
+  const binding = getChannelBinding(thread.parentId || thread.id) || getChannelBinding(thread.id);
+  if (!binding) return;
 
   const ts = getThreadSession(thread.id);
-
   const config = loadConfig();
 
   if (message.attachments.size > 0 && config?.voice.enabled) {
     const audio = message.attachments.first();
-    if (audio && audio.contentType?.startsWith("audio/") && thread.parentId && autocodeEnabled) {
+    if (audio && audio.contentType?.startsWith("audio/") && thread.parentId && enabled) {
+      if (audio.size > 10 * 1024 * 1024) {
+        await thread.send("Voice message too large to transcribe (max 10 MB).").catch(() => undefined);
+        return;
+      }
       const text = await transcribeVoice(audio.url);
       if (!text) return;
       await queuePrompt({
         prompt: text,
         channelId: thread.parentId,
         threadId: thread.id,
-        projectAlias: useBinding.projectAlias,
+        projectAlias: binding.projectAlias,
         sessionId: ts?.sessionId,
       });
       await thread.send("voice message").catch(() => undefined);
@@ -52,17 +53,15 @@ export async function handleMessage(message: Message): Promise<void> {
     }
   }
 
-  if (autocodeEnabled && thread) {
-    const content = message.cleanContent;
-    if (!content || content.startsWith("/") || content.length < 2) return;
-    logDebug(`Passthrough message in ${thread.id}`, "passthrough", { len: content.length });
-    await queuePrompt({
-      prompt: content,
-      channelId: thread.parentId || thread.id,
-      threadId: thread.id,
-      projectAlias: useBinding.projectAlias,
-      sessionId: ts?.sessionId,
-    });
-    thread.send(`✓ queued`).catch(() => undefined);
-  }
+  const content = message.cleanContent;
+  if (!content || content.startsWith("/") || content.length < 2) return;
+  logDebug(`Passthrough message in ${thread.id}`, "passthrough", { len: content.length });
+  await queuePrompt({
+    prompt: content,
+    channelId: thread.parentId || thread.id,
+    threadId: thread.id,
+    projectAlias: binding.projectAlias,
+    sessionId: ts?.sessionId,
+  });
+  thread.send(`✓ queued`).catch(() => undefined);
 }

@@ -206,6 +206,7 @@ describe("storage — config", () => {
       github: { enabled: true },
       voice: { enabled: false },
       queue: { continueOnFailure: true, freshContext: false },
+      startup: { bootWithWindows: false },
     };
     saveConfig(cfg);
     expect(existsSync(getConfigPath())).toBe(true);
