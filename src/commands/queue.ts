@@ -94,11 +94,9 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     const includeRunning = interaction.options.getBoolean("include_running") ?? false;
     const active = qs.getActiveJob();
     const cleared = qs.clearQueued();
-    let runningCancelled = false;
     let runningNote = "";
     if (includeRunning && active) {
       const r = await cancelJobById(active.id);
-      runningCancelled = r.ok;
       runningNote = r.ok ? " Running job cancellation requested." : ` Could not cancel running job: ${r.message}`;
     } else if (!includeRunning && active) {
       runningNote = ` Running job \`${active.id.slice(0, 8)}\` left untouched.`;

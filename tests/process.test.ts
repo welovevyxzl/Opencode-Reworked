@@ -35,6 +35,10 @@ describe("process launch safety", () => {
 describe("powershell launcher", () => {
   it("runs a powershell command and returns output", async () => {
     const res = await runPowerShell('Write-Output "ocr-test"', { timeout: 15000 });
+    if (res.code !== 0) {
+      // Do NOT weaken the assertion below; surface the failure for diagnosis.
+      process.stderr.write(`[powershell diagnostic] code=${res.code} stdout=${JSON.stringify(res.stdout)} stderr=${JSON.stringify(res.stderr)}\n`);
+    }
     expect(res.code).toBe(0);
     expect(res.stdout).toContain("ocr-test");
   });

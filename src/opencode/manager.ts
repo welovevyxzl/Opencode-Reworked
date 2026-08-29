@@ -1,6 +1,4 @@
-import { spawnSync } from "child_process";
 import { existsSync } from "fs";
-import { join, resolve } from "path";
 import { createOpencodeClient, createOpencodeServer, type OpencodeClient } from "@opencode-ai/sdk";
 import { logInfo, logWarn, logError, logDebug } from "../utils/logger.js";
 import { sleep } from "../utils/index.js";

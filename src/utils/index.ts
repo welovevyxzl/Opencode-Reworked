@@ -2,8 +2,6 @@ import { spawn } from "child_process";
 import { existsSync, statSync, readdirSync } from "fs";
 import { join, resolve } from "path";
 
-const SHIMS = [".cmd", ".exe", ".ps1", ""];
-
 // ---------------------------------------------------------------------------
 // Binary resolution — contract: return null when not found; throw only on
 // unexpected filesystem errors. No shell execution during resolution.
@@ -168,9 +166,41 @@ export function runPowerShell(
   command: string,
   opts: { timeout?: number } = {}
 ): Promise<RunCommandResult> {
-  return runCommand("powershell.exe", ["-NoProfile", "-Command", command], {
+  // resolveBinary walks PATH (preferring .exe), which beats spawn's SearchPath.
+  // On Windows the WindowsPowerShell dir is often absent from PATH, so fall
+  // back to the standard install locations too.
+  const bin =
+    resolveBinary("powershell") ?? resolveBinary("pwsh") ?? findWindowsPowerShell();
+  if (!bin) {
+    return Promise.resolve({
+      stdout: "",
+      stderr: "PowerShell not found on PATH (expected powershell.exe or pwsh)",
+      code: 1,
+    });
+  }
+  return runCommand(bin, ["-NoProfile", "-Command", command], {
     timeout: opts.timeout ?? 15000,
   });
+}
+
+function findWindowsPowerShell(): string | null {
+  if (process.platform !== "win32") return null;
+  const sysRoot = process.env.SystemRoot || "C:\\Windows";
+  const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+  const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+  const candidates = [
+    join(sysRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    join(programFiles, "PowerShell", "7", "pwsh.exe"),
+    join(programFilesX86, "PowerShell", "7", "pwsh.exe"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) return candidate;
+    } catch {
+      // ignore unreadable paths
+    }
+  }
+  return null;
 }
 
 export function isValidPath(p: string): boolean {

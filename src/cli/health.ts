@@ -4,7 +4,7 @@ import { isConnected, getClient } from "../discord/bot.js";
 import { logInfo, logWarn, logError } from "../utils/logger.js";
 import { resolveDiscordChannel } from "../discord/channels.js";
 import * as qs from "../opencode/queue-service.js";
-import { getDatabase, getQueueItem } from "../storage/index.js";
+import { getDatabase } from "../storage/index.js";
 
 /**
  * Health monitoring with state transitions (no spam) and recovery messages.
@@ -25,7 +25,6 @@ interface HealthState {
 }
 
 const COOLDOWN_MS = 5 * 60_000;
-const STALL_THRESHOLD_MS = 10 * 60_000;
 
 let last: HealthState = { opencode: "up", database: "up", queueWorker: "up", git: "up", github: "up", job: "up" };
 let lastNotify = 0;

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
-import { initDatabase, closeDatabase } from "../src/storage/index.js";
+import { initDatabase, closeDatabase, getDatabase } from "../src/storage/index.js";
 import * as qs from "../src/opencode/queue-service.js";
 import { useFakeHome } from "./helpers.js";
 
@@ -20,7 +20,10 @@ describe("queue-service", () => {
   });
   beforeEach(() => {
     qs.setPaused(false);
-    qs.clearQueued();
+    // Isolate each test: wipe every queue row so a job left active (starting/
+    // running/cancelling) by a previous test cannot block the single-slot claim.
+    const db = getDatabase();
+    if (db) db.prepare("DELETE FROM queue_items").run();
   });
 
   it("enqueues and claims jobs in FIFO order", () => {
@@ -120,20 +123,27 @@ describe("queue-service", () => {
   });
 
   it("recoverInterruptedJobs requeues running jobs and treats cancelling as cancelled", async () => {
-    const [a] = enq(2);
-    const [b] = enq(1);
-    const active = qs.claimNextJob()!;
-    qs.markRunning(active.id);
-    const actB = qs.claimNextJob()!;
-    qs.markRunning(actB.id);
-    qs.markCancelling(actB.id, "crash before cancel finished");
-
+    // A running job whose session is still alive is requeued on restart.
+    const [first] = enq(1);
+    const a = qs.claimNextJob()!;
+    qs.markRunning(a.id);
     const report = await qs.recoverInterruptedJobs({ sessionAlive: async () => true });
-    expect(report.inspected).toBe(2);
-    expect(report.requeued).toContain(active.id);
-    expect(report.cancelled).toContain(actB.id);
-    void a;
-    void b;
+    expect(report.inspected).toBe(1);
+    expect(report.requeued).toContain(first);
+    expect(qs.getJob(first)!.status).toBe("queued");
+
+    // Clear the requeued job so the single execution slot is free again.
+    qs.removeQueuedJob(first);
+
+    // A job whose cancellation was in flight is treated as cancelled on restart.
+    const [second] = enq(1);
+    const b = qs.claimNextJob()!;
+    qs.markRunning(b.id);
+    qs.markCancelling(b.id, "crash before cancel finished");
+    const report2 = await qs.recoverInterruptedJobs({ sessionAlive: async () => true });
+    expect(report2.inspected).toBe(1);
+    expect(report2.cancelled).toContain(second);
+    expect(qs.getJob(second)!.status).toBe("cancelled");
   });
 
   it("persists queue state across a database reopen", () => {

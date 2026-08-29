@@ -136,9 +136,6 @@ export async function enableScheduledAutostart(opts: { onUnlock?: boolean; onRes
   const ocrCommand = "ocr start";
   // Build trigger sub-collections; each is a fixed string, no interpolation
   // of user data beyond the literal command we launch.
-  const logonTrigger = "New-ScheduledTaskTrigger -AtLogOn";
-  const unlockTrigger = opts.onUnlock === false ? "" : "New-ScheduledTaskTrigger -AtLogOn";
-  void unlockTrigger;
   const triggers = ["(New-ScheduledTaskTrigger -AtLogOn)"];
   // Workstation unlock + resume use event-based triggers via CIM filters.
   if (opts.onUnlock !== false) {

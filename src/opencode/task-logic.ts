@@ -1,8 +1,6 @@
 import { getProjectState, loadConfig } from "../storage/index.js";
-import type { QueueItem } from "../types/index.js";
 import { buildPromptContext } from "./project-context.js";
-import { runVerification, type VerificationReport } from "./verify.js";
-import { logJobEvent } from "../utils/logger.js";
+import type { VerificationReport } from "./verify.js";
 
 /**
  * Autopilot task-state management. Instead of spamming "continue", each

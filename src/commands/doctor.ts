@@ -1,12 +1,12 @@
 import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder, Colors } from "discord.js";
 import { loadConfig } from "../storage/index.js";
-import { runCommand, getNodeVersion, getPlatform, isValidPath } from "../utils/index.js";
+import { runCommand, getNodeVersion, isValidPath } from "../utils/index.js";
 import * as oc from "../opencode/manager.js";
 import { isAuthenticated, findGh } from "../github/index.js";
 import { checkPort } from "../system/index.js";
 import { Icons } from "../discord/ui.js";
 import * as qs from "../opencode/queue-service.js";
-import { getDatabase, checkDatabaseIntegrity, checkDatabaseWritable, getQueueItem } from "../storage/index.js";
+import { checkDatabaseIntegrity, checkDatabaseWritable } from "../storage/index.js";
 import { getBuildInfo } from "../utils/build-info.js";
 
 interface CheckResult {

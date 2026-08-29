@@ -3,7 +3,6 @@ import { getChannelBinding, getThreadSession, getProjectState, getPendingAction,
 import { logWarn } from "../utils/logger.js";
 import { checkAuth } from "../security/auth.js";
 import { queuePrompt, getEngineStatus } from "../opencode/engine.js";
-import * as qs from "../opencode/queue-service.js";
 import { getDiff as gitGetDiff, diffToFile, stageAll, commit, push, getCurrentBranch, deleteWorktree } from "../git/index.js";
 import { createPullRequest } from "../github/index.js";
 import { handleConfirmAction } from "./confirmations.js";

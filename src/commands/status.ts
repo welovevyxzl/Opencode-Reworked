@@ -1,6 +1,6 @@
 import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder, Colors } from "discord.js";
 import { getBotStatus } from "../discord/bot.js";
-import { getServerInfo, isHealthy, isUnhealthy, getBinaryPath } from "../opencode/manager.js";
+import { getServerInfo, isHealthy, isUnhealthy } from "../opencode/manager.js";
 import { getEngineStatus, queueSettings } from "../opencode/engine.js";
 import * as qs from "../opencode/queue-service.js";
 import { loadConfig, getChannelBinding, getProjectState } from "../storage/index.js";
