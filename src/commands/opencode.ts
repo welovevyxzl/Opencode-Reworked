@@ -40,7 +40,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     return;
   }
 
-  const binding = getChannelBinding(channelId);
+  const binding = getChannelBinding(channelId) || (channel instanceof ThreadChannel ? getChannelBinding(channel.id) : null);
   let projectAlias: string | null = null;
   if (binding) projectAlias = binding.projectAlias;
   if (projectOpt) projectAlias = projectOpt;

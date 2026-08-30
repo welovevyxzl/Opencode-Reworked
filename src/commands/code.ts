@@ -27,7 +27,10 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
 
   const mode = interaction.options.getString("mode", true) as AutocodeMode;
   const parentId = (channel.parentId || interaction.channelId) as string;
-  const binding = getChannelBinding(parentId);
+  // Bindings are normally keyed by parent channel ID; fall back to the thread's
+  // own binding (e.g. from an older /use run inside the thread) so the command
+  // still works even when the parent has no binding.
+  const binding = getChannelBinding(parentId) || getChannelBinding(channel.id);
   if (!binding) {
     await interaction.reply({ content: "No project bound to this thread's channel. Use `/use` first.", ephemeral: true });
     return;

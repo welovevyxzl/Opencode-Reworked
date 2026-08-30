@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from "discord.js";
+import { SlashCommandBuilder, ChatInputCommandInteraction, ThreadChannel } from "discord.js";
 import { loadConfig, getChannelBinding, saveChannelBinding } from "../storage/index.js";
 
 export const data = new SlashCommandBuilder()
@@ -22,8 +22,17 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     return;
   }
 
-  const binding = getChannelBinding(interaction.channelId) || {
-    channelId: interaction.channelId,
+  // Bind the parent channel, not the thread: /code, /opencode and /autocode all
+  // resolve bindings by parent ID, so a /use run inside a thread must target the
+  // parent to be honored. (Threads inherit the binding via their parentId.)
+  const channel = interaction.channel;
+  const channelId =
+    channel instanceof ThreadChannel
+      ? (channel.parentId ?? channel.id)
+      : interaction.channelId;
+
+  const binding = getChannelBinding(channelId) || {
+    channelId,
     projectAlias,
     autocode: "inherit",
     threadSessionMap: new Map<string, string>(),
