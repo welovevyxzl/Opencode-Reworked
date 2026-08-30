@@ -1,13 +1,14 @@
 # OpenCode Remote
 
-A reliable Discord remote-control system for [OpenCode](https://opencode.ai). Run the OpenCode agent on your Windows PC and drive it from Discord: send prompts, review diffs, commit and push work, and control the machine — all through slash commands.
+A reliable Discord remote-control system for [OpenCode](https://opencode.ai). Run the OpenCode agent on your Windows PC and drive it from Discord: send prompts, review diffs, commit and push work, manage sessions and queues, and control the machine — all through slash commands.
 
 ## Features
 
 - **Remote OpenCode control** — `/opencode` creates a dedicated thread, runs your prompt through a managed OpenCode server, streams live status, and posts the result.
 - **Thread & session model** — every prompt runs in its own Discord thread tied to an OpenCode session. Continue, diff, or reset the context per thread.
-- **Passthrough / voice mode** — `/code` turns a thread into a plain-message pipe to OpenCode; `/autocode` sets it for whole projects; optional voice-message transcription (Whisper).
+- **Passthrough / voice mode** — `/code` turns a thread into a plain-message pipe to OpenCode; `/autocode` sets it for whole projects; `/voice` adds optional voice-message transcription (Whisper).
 - **Queue** — prompts queue when OpenCode is busy; `/queue` lets you inspect, pause, resume, clear, or cancel items.
+- **Tasks** — `/task` runs long-lived, multi-step OpenCode jobs per project (start / status / stop / cancel), with continuation across multiple prompts.
 - **Git & GitHub** — `/diff`, `/git` (status/commit/push/pull/branches/worktrees), `/github` (PR list/create, repo create/view). Uses `gh` when available.
 - **PC control** — owner-only `/pc` (sleep, restart, shutdown) with a 30-second in-Discord confirmation.
 - **Reliability** — automatic OpenCode server start, health checks, restart with back-off, queue persistence (SQLite), and graceful shutdown.
@@ -58,14 +59,15 @@ Everything is stored in `%USERPROFILE%\.opencode-remote\config.json`; runtime st
 | Command | Description |
 | --- | --- |
 | `/opencode <prompt> [project]` | Send a prompt to OpenCode in a new thread. |
-| `/code` | Toggle passthrough mode for the current thread. |
-| `/autocode <enabled>` | Toggle passthrough for a whole project. |
+| `/code <mode>` | Set passthrough mode for the current thread (`inherit` / `enabled` / `disabled`). |
+| `/autocode <mode> [apply_to_threads]` | Set passthrough mode for a whole project (threads inherit by default). |
 | `/setpath` | Register a local project by alias (path autocomplete). |
 | `/projects` | List registered projects. |
 | `/use` | Bind this channel to a project. |
 | `/session` | list / new / attach / detach / info / delete / rename sessions. |
 | `/model <model>` | Set the model for the current project (autocomplete from the server). |
 | `/queue` | status / list / clear / remove / pause / resume / settings. |
+| `/task` | Start long-lived OpenCode jobs: start / status / stop / cancel. |
 | `/diff [type]` | Show a git diff of the project. |
 | `/work` | Create a worktree + branch for focused OpenCode work. |
 | `/allow` | Manage the Discord allowlist (owner only). |
@@ -77,6 +79,8 @@ Everything is stored in `%USERPROFILE%\.opencode-remote\config.json`; runtime st
 | `/github` | create-repo / pr / check / auth. |
 | `/files` | Browse files in the bound project. |
 | `/logs [lines]` | Recent bot logs (redacted). |
+| `/memory` | View / add / clear per-project notes included in prompts. |
+| `/remote` | Show the machine's remote-access info (owner only). |
 | `/stop` | Cancel the running OpenCode task. |
 | `/help` | Command reference. |
 | `/pc` | sleep / restart / shutdown (owner only, confirmed in Discord). |
@@ -93,6 +97,7 @@ Everything is stored in `%USERPROFILE%\.opencode-remote\config.json`; runtime st
 | `ocr doctor` | Run diagnostics. |
 | `ocr deploy` / `ocr undeploy` | Register / remove slash commands on the guild. |
 | `ocr config` | Show configuration (values redacted). |
+| `ocr autostart` | Install / remove the Windows scheduled task (run on login). |
 | `ocr update` | Check for updates. |
 
 ## Security model
@@ -100,7 +105,7 @@ Everything is stored in `%USERPROFILE%\.opencode-remote\config.json`; runtime st
 - **Allowlist**: only users in the allowlist can control the machine. `/allow` and `/pc` are owner-only, as are destructive PC actions.
 - **Server auth**: the app sets `OPENCODE_SERVER_PASSWORD` and authenticates to the OpenCode API with HTTP Basic (`opencode:<password>`). The password is auto-generated during setup.
 - **Log redaction**: Discord tokens, API keys, GitHub tokens, Bearer tokens, and passwords are scrubbed from every log line.
-- **Windows safety**: commands are launched as argument arrays (never shell-joined); paths with spaces are supported; `.cmd` shims are avoided via full-path resolution.
+- **Windows safety**: commands are launched as argument arrays (never shell-joined), paths with spaces are supported, and `.cmd`/`.bat` npm shims are resolved and executed through `cmd.exe` with fully escaped arguments (no bare shell execution or injection surface).
 
 ## Persistence & logs
 
@@ -114,7 +119,9 @@ Everything is stored in `%USERPROFILE%\.opencode-remote\config.json`; runtime st
 - **"You are not authorized"** — add the user with `/allow add user`.
 - **OpenCode not reachable** — run `/doctor` or `ocr doctor`; confirm the server starts with `ocr start`.
 - **Port already in use** — `netstat -ano | findstr :4096`, then change the port or use `/setports`.
-- **Commands missing in Discord** — run `ocr deploy` (bot needs `applications.commands` scope).
+- **Commands missing / stale in Discord** — run `ocr deploy` to push the current command definitions (needed after command or option changes; the bot needs the `applications.commands` scope).
+- **"Required option not found"** — the deployed command is stale; run `ocr deploy`.
+- **Nothing posted to the thread on completion** — the result embed should post automatically; if not, check the log for a `Thread message failed` line and report it.
 - **Voice transcription** — `/voice enable` with an OpenAI API key.
 
 ## Development
