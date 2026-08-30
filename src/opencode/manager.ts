@@ -2,7 +2,7 @@ import { existsSync } from "fs";
 import { createOpencodeClient, createOpencodeServer, type OpencodeClient } from "@opencode-ai/sdk";
 import { logInfo, logWarn, logError, logDebug } from "../utils/logger.js";
 import { sleep } from "../utils/index.js";
-import { resolveBinary, runCommand } from "../utils/index.js";
+import { listResolvedBinaries, runCommand } from "../utils/index.js";
 import type { Config } from "../types/index.js";
 import { subscribeSessionEvents, type PromptEvent } from "./events.js";
 
@@ -50,25 +50,55 @@ export function getBinaryPath(): string | null {
   return binaryPath;
 }
 
-async function detectOpenCodeBinary(): Promise<string | null> {
-  if (binaryPath && existsSync(binaryPath)) return binaryPath;
-
-  const candidate = resolveBinary("opencode");
-  if (!candidate) return null;
-
-  // Validate the binary actually runs (handles broken shims).
-  const test = await runCommand(candidate, ["--version"], { timeout: 15000 });
-  if (test.code === 0) {
-    binaryPath = candidate;
-    logInfo("Found OpenCode binary", "opencode", { path: candidate });
-    return candidate;
+async function verifyBinary(path: string): Promise<boolean> {
+  try {
+    // .cmd/.bat shims are routed through cmd.exe inside runCommand, so this is
+    // also a real spawn test of the shim (handles broken/empty .cmd files).
+    const test = await runCommand(path, ["--version"], { timeout: 15000 });
+    if (test.code !== 0) {
+      logDebug(`OpenCode candidate failed --version: ${path}`, "opencode", { stderr: test.stderr.slice(0, 200) });
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
   }
-  logDebug(`Binary candidate failed version check: ${candidate}`, "opencode", { stderr: test.stderr.slice(0, 200) });
+}
+
+async function detectOpenCodeBinary(): Promise<string | null> {
+  // Cache only a previously-verified binary, and re-verify it: if the cached
+  // path stopped working (e.g. an npm-global shim was replaced), invalidate it
+  // and resolve from scratch instead of handing back a dead path.
+  if (binaryPath) {
+    if (existsSync(binaryPath) && (await verifyBinary(binaryPath))) {
+      return binaryPath;
+    }
+    logWarn("Cached OpenCode binary no longer responds to --version; re-resolving", "opencode", { path: binaryPath });
+    binaryPath = null;
+  }
+
+  // Try every PATH candidate (including .cmd/.bat npm shims and npm-global
+  // locations) and return the FIRST one that actually runs — not merely the
+  // first existing file, which may be a broken shim.
+  for (const candidate of listResolvedBinaries("opencode")) {
+    if (!existsSync(candidate)) continue;
+    if (await verifyBinary(candidate)) {
+      binaryPath = candidate;
+      logInfo("Found OpenCode binary", "opencode", { path: candidate });
+      return candidate;
+    }
+  }
+
   return null;
 }
 
 export async function findOpenCodeBinary(): Promise<string | null> {
   return detectOpenCodeBinary();
+}
+
+/** Test hook: clear the cached, verified binary so resolution runs from scratch. */
+export function resetOpenCodeBinaryCache(): void {
+  binaryPath = null;
 }
 
 async function validateServerStartable(): Promise<{ ok: boolean; message: string }> {

@@ -7,26 +7,47 @@ import { join, resolve } from "path";
 // unexpected filesystem errors. No shell execution during resolution.
 // ---------------------------------------------------------------------------
 
+/**
+ * Return the first PATH-resolvable candidate for `name` (or null). This keeps
+ * the historical single-result contract for callers that only need "the
+ * binary"; consumers that need to try several candidates should use
+ * listResolvedBinaries() instead.
+ */
 export function resolveBinary(name: string): string | null {
-  if (process.platform === "win32") {
-    return resolveWindowsBinary(name);
-  }
-  return resolveUnixBinary(name);
+  const list = listResolvedBinaries(name);
+  return list.length > 0 ? list[0] : null;
 }
 
-function resolveUnixBinary(name: string): string | null {
+/**
+ * Enumerate every PATH-resolvable candidate for `name`, in preference order.
+ * - Windows: walks PATH and PATHEXT (real executables .EXE/.COM before .cmd/.bat
+ *   shims), plus the standard npm global shim directories so that npm-global
+ *   installs are found even if the running process' PATH omits them.
+ * - Unix: walks PATH looking for an executable of exactly `name`.
+ * Deduplicates by normalized path so the same file is never returned twice.
+ * Never executes anything and throws only on unexpected permission errors.
+ */
+export function listResolvedBinaries(name: string): string[] {
+  if (process.platform === "win32") {
+    return listWindowsBinaries(name);
+  }
+  return listUnixBinaries(name);
+}
+
+function listUnixBinaries(name: string): string[] {
+  const out: string[] = [];
   const pathDirs = (process.env.PATH || "").split(":").filter((p) => p.length > 0);
   for (const dir of pathDirs) {
     const candidate = resolve(dir, name);
     try {
-      if (existsSync(candidate) && statSync(candidate).isFile()) {
-        return candidate;
+      if (existsSync(candidate) && statSync(candidate).isFile() && !out.includes(candidate)) {
+        out.push(candidate);
       }
     } catch (err) {
       if (isPermissionError(err)) throw err;
     }
   }
-  return null;
+  return out;
 }
 
 function isPermissionError(err: unknown): boolean {
@@ -34,39 +55,84 @@ function isPermissionError(err: unknown): boolean {
   return e?.code === "EACCES" || e?.code === "EPERM";
 }
 
-function resolveWindowsBinary(name: string): string | null {
-  const pathDirs = (process.env.PATH || "").split(";").filter((p) => p.length > 0);
+function windowsExtOrder(): string[] {
   const pathExt = (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
-  // Prefer real executables over script shims: .EXE first, .CMD last.
-  const extOrder = [...pathExt].sort((a, b) => {
-    const rank = (ext: string) => (ext.toUpperCase() === ".EXE" ? 0 : ext.toUpperCase() === ".COM" ? 1 : ext.toUpperCase() === ".CMD" || ext.toUpperCase() === ".BAT" ? 3 : 2);
-    return rank(a) - rank(b);
-  });
-  const hasExt = /\.[a-z0-9]+$/i.test(name);
+  const rank = (ext: string) => {
+    const e = ext.toUpperCase();
+    if (e === ".EXE") return 0;
+    if (e === ".COM") return 1;
+    if (e === ".BAT") return 3;
+    if (e === ".CMD") return 4;
+    return 2;
+  };
+  return [...pathExt].sort((a, b) => rank(a) - rank(b));
+}
 
-  for (const dir of pathDirs) {
+/** Standard npm global shim locations (e.g. %APPDATA%\npm\opencode.cmd). */
+function npmGlobalDirs(): string[] {
+  const out: string[] = [];
+  const pushEnv = (envVar: string, ...tail: string[]) => {
+    const base = process.env[envVar];
+    if (base) out.push(join(base, ...tail));
+  };
+  pushEnv("APPDATA", "npm");
+  pushEnv("USERPROFILE", "AppData", "Roaming", "npm");
+  return out;
+}
+
+function listWindowsBinaries(name: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const push = (candidate: string) => {
+    const norm = candidate.toLowerCase();
+    if (seen.has(norm)) return;
     try {
-      if (hasExt) {
-        const candidate = resolve(dir, name);
-        if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
-      } else {
-        for (const ext of extOrder) {
-          const candidate = resolve(dir, name + ext.toLowerCase());
-          if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
-          const upper = resolve(dir, name + ext.toUpperCase());
-          if (upper !== candidate && existsSync(upper) && statSync(upper).isFile()) return upper;
-        }
+      if (existsSync(candidate) && statSync(candidate).isFile()) {
+        seen.add(norm);
+        out.push(candidate);
       }
     } catch (err) {
       if (isPermissionError(err)) throw err;
     }
+  };
+
+  const hasExt = /\.[a-z0-9]+$/i.test(name);
+  const dirs = [
+    ...(process.env.PATH || "").split(";").filter((p) => p.length > 0),
+    ...npmGlobalDirs(),
+  ];
+
+  for (const dir of dirs) {
+    if (hasExt) {
+      push(resolve(dir, name));
+    } else {
+      for (const ext of windowsExtOrder()) {
+        // Case-insensitive filesystems: try lower then upper so a shim that was
+        // installed with either casing is found; `seen` de-duplicates the pair.
+        push(resolve(dir, name + ext.toLowerCase()));
+        const upper = resolve(dir, name + ext.toUpperCase());
+        if (upper.toLowerCase() !== resolve(dir, name + ext.toLowerCase()).toLowerCase()) {
+          push(upper);
+        }
+      }
+    }
   }
-  return null;
+  return out;
 }
 
 // ---------------------------------------------------------------------------
 // Windows-safe process spawning
 // ---------------------------------------------------------------------------
+
+/**
+ * Escape a .cmd/.bat command path for cmd.exe `/c` invocation, mirroring
+ * cross-spawn's escapeCommand: caret-escape cmd metacharacters (including
+ * spaces) WITHOUT wrapping in quotes, so the path stays a single token and can
+ * be grouped by the single outer quote wrapper added by the caller.
+ */
+function escapeWindowsCmd(cmd: string): string {
+  return cmd.replace(/([()\][!^"`%&<>|;,*?= ])/g, "^$1");
+}
 
 /**
  * Escape a single argument for cmd.exe `/c` invocation. Algorithm mirrors the
@@ -80,7 +146,7 @@ function escapeWindowsCmdArg(arg: string, doubleEscape = false): string {
   s = s.replace(/(\\*)$/, "$1$1");
   s = `"${s}"`;
   // Caret-escape cmd metacharacters (inside quotes cmd still special-cases some).
-  s = s.replace(/([()\][!^"`%&<>|;,*?=])/g, "^$1");
+  s = s.replace(/([()\][!^"`%&<>|;,*?= ])/g, "^$1");
   if (doubleEscape) {
     s = s.replace(/(%)/g, "^$1");
   }
@@ -120,16 +186,20 @@ export function runCommand(
   return new Promise((resolvePromise) => {
     let child;
     if (isCmdShim(cmd)) {
-      // Never enable shell:true with user data. Route .cmd/.bat through
-      // cmd.exe with fully escaped arguments instead.
-      const combined = [escapeWindowsCmdArg(cmd), ...args.map((a) => escapeWindowsCmdArg(a))].join(" ");
-      child = spawn("cmd.exe", ["/d", "/s", "/c", combined], {
+      // Never enable shell:true with user data. Route .cmd/.bat through cmd.exe
+      // /d /s /c mirroring cross-spawn's proven construction: caret-escape the
+      // bare command path and each escaped arg, join them, then wrap the whole
+      // command line in a SINGLE outer pair of quotes that /s strips back down.
+      // The command must be an absolute path (ComSpec) because a freshly set
+      // PATH may not contain cmd.exe.
+      const shellCommand = [escapeWindowsCmd(cmd), ...args.map((a) => escapeWindowsCmdArg(a))].join(" ");
+      child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${shellCommand}"`], {
         cwd: opts.cwd,
         timeout: opts.timeout ?? 30000,
         env: { ...process.env, ...opts.env },
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
-        windowsVerbatimArguments: false,
+        windowsVerbatimArguments: true,
       });
     } else {
       child = spawn(cmd, args, {

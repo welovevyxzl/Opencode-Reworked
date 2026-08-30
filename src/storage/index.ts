@@ -86,6 +86,9 @@ export function initDatabase(): void {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
 
+  // Step 1: create tables (NO indexes on columns that may not exist yet in a
+  // pre-refactor database). CREATE TABLE IF NOT EXISTS is a no-op for tables
+  // that already exist, so this never drops or rewrites existing data.
   db.exec(`
     CREATE TABLE IF NOT EXISTS project_states (
       alias TEXT PRIMARY KEY,
@@ -164,41 +167,38 @@ export function initDatabase(): void {
       created_at INTEGER NOT NULL,
       expires_at INTEGER NOT NULL
     );
+  `);
+
+  // Step 2: run migrations BEFORE any CREATE INDEX / statement that references
+  // the newly-added columns, so an old database that is missing e.g. task_id is
+  // brought up to the current schema before ANY index on that column is built.
+  runMigrations(db);
+
+  // Step 3: create indexes only now that every referenced column is guaranteed
+  // to exist (fresh DBs get them here; migrated DBs get them after the ALTERs).
+  db.exec(`
     CREATE INDEX IF NOT EXISTS idx_queue_status ON queue_items(status, added_at);
     CREATE INDEX IF NOT EXISTS idx_queue_task ON queue_items(task_id);
   `);
 
-  runMigrations(db);
   logInfo("Database initialized", "storage");
 }
 
 function runMigrations(database: Database.Database): void {
-  // channel_bindings: add autocode_mode / is_thread
-  const bindingCols = database
-    .prepare("PRAGMA table_info(channel_bindings)")
-    .all() as Array<{ name: string }>;
-  if (!bindingCols.some((c) => c.name === "autocode_enabled")) {
-    database.exec("ALTER TABLE channel_bindings ADD COLUMN autocode_enabled INTEGER DEFAULT 0");
-  }
-  if (!bindingCols.some((c) => c.name === "autocode_mode")) {
-    database.exec("ALTER TABLE channel_bindings ADD COLUMN autocode_mode TEXT DEFAULT 'inherit'");
-  }
-  if (!bindingCols.some((c) => c.name === "is_thread")) {
-    database.exec("ALTER TABLE channel_bindings ADD COLUMN is_thread INTEGER DEFAULT 0");
-  }
-
-  const projectCols = database
-    .prepare("PRAGMA table_info(project_states)")
-    .all() as Array<{ name: string }>;
-  if (!projectCols.some((c) => c.name === "autocode_enabled")) {
-    database.exec("ALTER TABLE project_states ADD COLUMN autocode_enabled INTEGER DEFAULT 0");
-  }
-
-  // queue_items: add new columns for the state machine + heartbeats
-  const queueCols = database
-    .prepare("PRAGMA table_info(queue_items)")
-    .all() as Array<{ name: string }>;
-  const queueMigrations: Array<[string, string]> = [
+  // Idempotent, ordered column migrations. SQLite has no `ADD COLUMN IF NOT
+  // EXISTS`, so each table is inspected via PRAGMA table_info() against the
+  // REAL existing schema, and a column is only added when it is genuinely
+  // missing. Re-applying on a fresh or already-migrated database is a no-op,
+  // and no existing rows are touched (except the explicit backfills below).
+  ensureColumns(database, "project_states", [
+    ["autocode_enabled", "INTEGER DEFAULT 0"],
+  ]);
+  ensureColumns(database, "channel_bindings", [
+    ["autocode_enabled", "INTEGER DEFAULT 0"],
+    ["autocode_mode", "TEXT DEFAULT 'inherit'"],
+    ["is_thread", "INTEGER DEFAULT 0"],
+  ]);
+  ensureColumns(database, "queue_items", [
     ["title", "TEXT"],
     ["directory", "TEXT"],
     ["model", "TEXT"],
@@ -211,20 +211,56 @@ function runMigrations(database: Database.Database): void {
     ["attempt_count", "INTEGER DEFAULT 0"],
     ["last_error", "TEXT"],
     ["worker_id", "TEXT"],
-  ];
-  for (const [col, decl] of queueMigrations) {
-    if (!queueCols.some((c) => c.name === col)) {
-      database.exec(`ALTER TABLE queue_items ADD COLUMN ${col} ${decl}`);
-    }
-  }
+  ]);
+  // The tasks table grew several columns in the refactor; bring any pre-existing
+  // (old-shape) tasks table up to the current schema too.
+  ensureColumns(database, "tasks", [
+    ["directory", "TEXT"],
+    ["channel_id", "TEXT"],
+    ["thread_id", "TEXT"],
+    ["session_id", "TEXT"],
+    ["mode", "TEXT DEFAULT 'normal'"],
+    ["status", "TEXT DEFAULT 'pending'"],
+    ["max_iterations", "INTEGER DEFAULT 10"],
+    ["iteration", "INTEGER DEFAULT 0"],
+    ["state_json", "TEXT"],
+    ["updated_at", "INTEGER"],
+  ]);
+  ensureColumns(database, "pending_actions", [
+    ["channel_id", "TEXT"],
+    ["project_alias", "TEXT"],
+    ["payload_json", "TEXT"],
+  ]);
 
-  // Backfill attempt_count/updated_at for existing rows
+  // Backfill attempt_count/updated_at for existing (migrated) rows.
   database.exec(
     "UPDATE queue_items SET attempt_count = 0 WHERE attempt_count IS NULL"
   );
   database.exec(
     "UPDATE queue_items SET updated_at = added_at WHERE updated_at IS NULL"
   );
+}
+
+/**
+ * Inspect the real schema of `table` via PRAGMA table_info and add any of the
+ * given [column, declaration] pairs that are missing. Column declarations match
+ * the current TypeScript schema exactly. SQLite fills existing rows with the
+ * declared DEFAULT for TYPEd columns that carry one; columns without a DEFAULT
+ * are simply NULL for pre-existing rows, which the row-parsers treat as absent.
+ */
+function ensureColumns(
+  database: Database.Database,
+  table: string,
+  columns: Array<[string, string]>
+): void {
+  const existing = database
+    .prepare(`PRAGMA table_info(${table})`)
+    .all() as Array<{ name: string }>;
+  const names = new Set(existing.map((c) => c.name));
+  for (const [name, decl] of columns) {
+    if (names.has(name)) continue;
+    database.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+  }
 }
 
 export function closeDatabase(): void {

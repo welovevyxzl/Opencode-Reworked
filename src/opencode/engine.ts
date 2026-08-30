@@ -1,4 +1,4 @@
-import { Colors, ActionRowBuilder, ButtonBuilder, ButtonStyle, type Message } from "discord.js";
+import { Colors, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, type Message } from "discord.js";
 import {
   loadConfig,
   getProjectState,
@@ -507,7 +507,11 @@ export async function sendThreadMessage(threadId: string, content: unknown): Pro
       logWarn(`Cannot post to thread ${threadId}: not resolvable`, "engine");
       return;
     }
-    await channel.send(content as never);
+    // discord.js v14's .send() accepts string | MessagePayload | MessageCreateOptions,
+    // not a bare EmbedBuilder. Wrapping it as { embeds: [...] } is required, otherwise
+    // the message has no content and Discord rejects it with 50006 "empty message".
+    const payload = content instanceof EmbedBuilder ? { embeds: [content] } : content;
+    await channel.send(payload as never);
   } catch (err) {
     logWarn(`Thread message failed (${threadId}): ${String(err)}`, "engine");
   }
